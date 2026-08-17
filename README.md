@@ -1,0 +1,137 @@
+# MiniCodeAgent CLI
+
+MiniCodeAgent CLI is a lightweight tool-calling coding agent prototype. It is
+designed as a small resume project that demonstrates an agent loop, a modular
+tool registry, permission checks, execution tracing, and pytest coverage without
+requiring an LLM API key.
+
+## Features
+
+- Command-line entry point through `main.py` or the `minicodeagent` script.
+- Rule-based agent loop with planning, tool selection, tool execution,
+  observation handling, and final response generation.
+- Modular `ToolRegistry` for adding and looking up tools.
+- Built-in tools:
+  - `list_files`
+  - `read_file`
+  - `write_file`
+  - `search_text`
+  - `run_python`
+- Permission controls:
+  - allowlisted tools
+  - blocked unsafe Python patterns
+  - write protection with `--allow-write` or `--dry-run`
+- JSON execution trace logging.
+- Pytest tests for registry behavior, permissions, trace logging, and simple
+  agent flow.
+
+## Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+On macOS or Linux, activate the virtual environment with:
+
+```bash
+source .venv/bin/activate
+```
+
+## Usage
+
+List files:
+
+```bash
+python main.py "list files"
+```
+
+Read a file:
+
+```bash
+python main.py "read README.md"
+```
+
+Search text:
+
+```bash
+python main.py "search agent"
+```
+
+Preview a write without changing files:
+
+```bash
+python main.py "write notes.txt hello from MiniCodeAgent" --dry-run
+```
+
+Allow a real write:
+
+```bash
+python main.py "write notes.txt hello from MiniCodeAgent" --allow-write
+```
+
+Run restricted Python:
+
+```bash
+python main.py "python print(sum(range(5)))"
+```
+
+Write a trace file to a custom location:
+
+```bash
+python main.py "list files" --trace logs/trace.json
+```
+
+Restrict tools to a specific allowlist:
+
+```bash
+python main.py "read README.md" --allow-tool read_file
+```
+
+## Architecture
+
+```text
+main.py
+  -> minicodeagent.cli
+      -> MiniCodeAgent
+          -> plan prompt into a ToolCall
+          -> check permissions
+          -> execute selected tool from ToolRegistry
+          -> record observation
+          -> generate final response
+      -> TraceLogger writes JSON events
+```
+
+Key modules:
+
+- `minicodeagent/agent.py`: agent loop and rule-based planner.
+- `minicodeagent/cli.py`: command-line argument parsing and wiring.
+- `minicodeagent/registry.py`: tool metadata and lookup.
+- `minicodeagent/tools.py`: built-in tool implementations.
+- `minicodeagent/permissions.py`: allowlist, write, and unsafe code checks.
+- `minicodeagent/trace.py`: JSON trace events.
+
+## Testing
+
+```bash
+pytest
+```
+
+## Limitations
+
+- The planner is rule-based, not LLM-powered.
+- `run_python` uses a restricted execution environment and simple pattern
+  blocking. It is suitable for a demo, not for running untrusted code securely.
+- Tools are synchronous and local-only.
+- File reads and writes are limited to the selected workspace.
+- Write confirmation is represented by explicit CLI flags instead of an
+  interactive prompt.
+
+## Future Improvements
+
+- Add an LLM planner behind the existing `ToolCall` interface.
+- Add interactive confirmation prompts for writes.
+- Stream trace events during long-running tasks.
+- Add richer tool schemas and argument validation.
+- Package release workflow and CI.
