@@ -1,5 +1,7 @@
 # MiniCodeAgent CLI
 
+[![Tests](https://github.com/ikeylee123/MiniCodeAgent-CLI/actions/workflows/tests.yml/badge.svg)](https://github.com/ikeylee123/MiniCodeAgent-CLI/actions/workflows/tests.yml)
+
 MiniCodeAgent CLI is a lightweight tool-calling coding agent prototype. It is
 designed as a small resume project that demonstrates an agent loop, a modular
 tool registry, permission checks, execution tracing, and pytest coverage without
@@ -87,6 +89,49 @@ Restrict tools to a specific allowlist:
 
 ```bash
 python main.py "read README.md" --allow-tool read_file
+```
+
+## Demo
+
+List workspace files:
+
+```text
+$ python main.py "list files"
+README.md
+main.py
+minicodeagent/__init__.py
+minicodeagent/agent.py
+minicodeagent/cli.py
+minicodeagent/permissions.py
+minicodeagent/registry.py
+minicodeagent/tools.py
+minicodeagent/trace.py
+pyproject.toml
+tests/test_agent_flow.py
+tests/test_permissions.py
+tests/test_registry.py
+tests/test_trace.py
+```
+
+Run a restricted Python snippet:
+
+```text
+$ python main.py "python print(sum(range(5)))"
+10
+```
+
+Preview a write without changing files:
+
+```text
+$ python main.py "write notes.txt hello from MiniCodeAgent" --dry-run
+Dry run: notes.txt
+```
+
+Block a write unless it is explicitly allowed:
+
+```text
+$ python main.py "write notes.txt hello"
+error: write_file requires --allow-write or --dry-run before writing files
 ```
 
 ## Architecture
