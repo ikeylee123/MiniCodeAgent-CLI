@@ -43,6 +43,87 @@ source .venv/bin/activate
 
 ## Usage
 
+MiniCodeAgent has two layers of interaction:
+
+- CLI flags control mode, permissions, and trace behavior.
+- Prompt commands are parsed by the rule-based planner into tool calls.
+
+## Command Reference
+
+### One-shot mode
+
+Run a single prompt:
+
+```bash
+python main.py "<prompt>"
+```
+
+Examples:
+
+- `python main.py "list files"`
+- `python main.py "read README.md"`
+- `python main.py "search agent"`
+- `python main.py "write notes.txt hello world" --dry-run`
+- `python main.py "python print(sum(range(5)))"`
+
+### Interactive mode
+
+Start a session:
+
+```bash
+python main.py --interactive
+```
+
+Inside the session, enter prompt commands one at a time:
+
+- `list files`
+- `read README.md`
+- `search permission`
+- `write notes.txt hello world`
+- `python print(sum(range(5)))`
+
+Exit commands:
+
+- `exit`
+- `quit`
+
+### Supported prompt patterns
+
+The planner currently recognizes these patterns:
+
+| Prompt pattern | Tool call |
+| --- | --- |
+| `list files` | `list_files(path=".")` |
+| `list <path>` | `list_files(path="<path>")` |
+| `ls` | `list_files(path=".")` |
+| `read <path>` | `read_file(path="<path>")` |
+| `search <query> [path]` | `search_text(query="<query>", path="[path or .]")` |
+| `write <path> <content>` | `write_file(path="<path>", content="<content>")` |
+| `python <code>` | `run_python(code="<code>")` |
+
+If a prompt does not match a known pattern, the current fallback behavior is to
+list files in the workspace.
+
+### CLI flags
+
+These flags are passed when starting the program, not typed inside the
+interactive prompt:
+
+- `--interactive`: start a multi-step session
+- `--list-tools`: print available tools and schemas
+- `--show-trace`: print the JSON trace after each run
+- `--trace <path>`: write JSON trace events to a custom file
+- `--allow-write`: allow real file writes
+- `--dry-run`: preview writes without changing files
+- `--allow-tool <name>`: restrict execution to explicitly allowlisted tools
+- `--workspace <path>`: choose a workspace directory
+
+### Important behavior notes
+
+- `write` requires either `--allow-write` or `--dry-run`.
+- `--show-trace` works in both one-shot and interactive mode.
+- Prompt commands are simple rule-based patterns, not free-form natural language understanding.
+
 List files:
 
 ```bash
