@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from builtins import input as builtin_input
 from pathlib import Path
 
 from .agent import MiniCodeAgent
@@ -35,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the execution trace after the final response",
     )
     parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Start an interactive session",
+    )
+    parser.add_argument(
         "--allow-tool",
         action="append",
         dest="allowed_tools",
@@ -51,8 +57,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_tools:
         print(format_tools(registry.descriptions(), registry.schemas()))
         return 0
-    if not args.prompt:
-        build_parser().error("prompt is required unless --list-tools is used")
 
     allowed_tools = set(args.allowed_tools) if args.allowed_tools else DEFAULT_ALLOWED_TOOLS
     permissions = PermissionController(
@@ -68,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         permissions=permissions,
         trace=TraceLogger(args.trace),
     )
+    if args.interactive:
+        return run_interactive(agent, show_trace=args.show_trace)
+    if not args.prompt:
+        build_parser().error("prompt is required unless --list-tools or --interactive is used")
     try:
         response = agent.run(args.prompt)
         print(response)
@@ -78,6 +86,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}")
         return 1
     return 0
+
+
+def run_interactive(
+    agent: MiniCodeAgent,
+    show_trace: bool = False,
+    input_fn=builtin_input,
+) -> int:
+    print("MiniCodeAgent interactive mode. Type 'exit' or 'quit' to leave.")
+    while True:
+        try:
+            prompt = input_fn("MiniCodeAgent> ").strip()
+        except EOFError:
+            print("Session ended.")
+            return 0
+        if not prompt:
+            continue
+        if prompt.lower() in {"exit", "quit"}:
+            print("Session ended.")
+            return 0
+        try:
+            response = agent.run(prompt)
+            print(response)
+            if show_trace:
+                print("\nTrace:")
+                print(agent.trace.to_json())
+        except (PermissionDenied, FileNotFoundError, ValueError, KeyError) as exc:
+            print(f"error: {exc}")
 
 
 def format_tools(

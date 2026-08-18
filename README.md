@@ -103,6 +103,12 @@ Print the execution trace after the final response:
 python main.py "search agent" --show-trace
 ```
 
+Start an interactive agent session:
+
+```bash
+python main.py --interactive
+```
+
 ## Demo
 
 List workspace files:
@@ -162,6 +168,23 @@ search_text: Search text files for a query.
 write_file: Write a UTF-8 text file.
   - path (string, required): File path relative to the workspace.
   - content (string, required): Content to write to the file.
+```
+
+Run a multi-step session:
+
+```text
+$ python main.py --interactive
+MiniCodeAgent interactive mode. Type 'exit' or 'quit' to leave.
+MiniCodeAgent> list files
+README.md
+main.py
+minicodeagent/__init__.py
+...
+MiniCodeAgent> read README.md
+# MiniCodeAgent CLI
+...
+MiniCodeAgent> exit
+Session ended.
 ```
 
 ## Architecture

@@ -1,4 +1,5 @@
 from minicodeagent.agent import MiniCodeAgent
+from minicodeagent.cli import run_interactive
 from minicodeagent.permissions import PermissionConfig, PermissionController
 from minicodeagent.tools import build_registry
 from minicodeagent.trace import TraceLogger
@@ -53,3 +54,29 @@ def test_agent_search_skips_git_directory(tmp_path):
     agent = make_agent(tmp_path)
 
     assert agent.run("search agent") == "visible.txt:1: public agent"
+
+
+def test_interactive_session_runs_multiple_commands(tmp_path, capsys):
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+    prompts = iter(["read hello.txt", "search world", "exit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "MiniCodeAgent interactive mode." in captured
+    assert "hello world" in captured
+    assert "hello.txt:1: hello world" in captured
+    assert "Session ended." in captured
+
+
+def test_interactive_session_handles_permission_errors(tmp_path, capsys):
+    prompts = iter(["write note.txt hello", "quit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "error: write_file requires --allow-write or --dry-run before writing files" in captured
