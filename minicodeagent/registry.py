@@ -13,6 +13,7 @@ class Tool:
     name: str
     description: str
     handler: ToolHandler
+    schema: dict[str, Any]
     mutates_files: bool = False
 
 
@@ -36,3 +37,6 @@ class ToolRegistry:
 
     def descriptions(self) -> dict[str, str]:
         return {name: tool.description for name, tool in sorted(self._tools.items())}
+
+    def schemas(self) -> dict[str, dict[str, Any]]:
+        return {name: tool.schema for name, tool in sorted(self._tools.items())}

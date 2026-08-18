@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .agent import MiniCodeAgent
@@ -20,9 +21,19 @@ DEFAULT_ALLOWED_TOOLS = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MiniCodeAgent CLI")
-    parser.add_argument("prompt", help="Task prompt, for example: 'list files'")
+    parser.add_argument("prompt", nargs="?", help="Task prompt, for example: 'list files'")
     parser.add_argument("--workspace", default=".", help="Workspace directory")
     parser.add_argument("--trace", default="trace.json", help="JSON trace output path")
+    parser.add_argument(
+        "--list-tools",
+        action="store_true",
+        help="List registered tools and their schemas",
+    )
+    parser.add_argument(
+        "--show-trace",
+        action="store_true",
+        help="Print the execution trace after the final response",
+    )
     parser.add_argument(
         "--allow-tool",
         action="append",
@@ -36,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    registry = build_registry()
+    if args.list_tools:
+        print(format_tools(registry.descriptions(), registry.schemas()))
+        return 0
+    if not args.prompt:
+        build_parser().error("prompt is required unless --list-tools is used")
+
     allowed_tools = set(args.allowed_tools) if args.allowed_tools else DEFAULT_ALLOWED_TOOLS
     permissions = PermissionController(
         PermissionConfig(
@@ -46,13 +64,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     agent = MiniCodeAgent(
         workspace=Path(args.workspace),
-        registry=build_registry(),
+        registry=registry,
         permissions=permissions,
         trace=TraceLogger(args.trace),
     )
     try:
-        print(agent.run(args.prompt))
+        response = agent.run(args.prompt)
+        print(response)
+        if args.show_trace:
+            print("\nTrace:")
+            print(agent.trace.to_json())
     except (PermissionDenied, FileNotFoundError, ValueError, KeyError) as exc:
         print(f"error: {exc}")
         return 1
     return 0
+
+
+def format_tools(
+    descriptions: dict[str, str],
+    schemas: dict[str, dict[str, object]],
+) -> str:
+    lines: list[str] = []
+    for name, description in descriptions.items():
+        lines.append(f"{name}: {description}")
+        schema = schemas[name]
+        for arg_name, arg_schema in schema.items():
+            required = "required" if arg_schema.get("required") else "optional"
+            default = (
+                f", default={json.dumps(arg_schema['default'])}"
+                if "default" in arg_schema
+                else ""
+            )
+            lines.append(
+                f"  - {arg_name} ({arg_schema['type']}, {required}{default}): "
+                f"{arg_schema['description']}"
+            )
+    return "\n".join(lines)

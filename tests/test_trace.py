@@ -14,3 +14,12 @@ def test_trace_logger_writes_json(tmp_path):
     assert payload[0]["type"] == "plan"
     assert payload[0]["data"] == {"tool": "list_files"}
     assert "timestamp" in payload[0]
+
+
+def test_trace_logger_formats_json_without_writing():
+    logger = TraceLogger()
+
+    logger.record("final", text="done")
+
+    assert '"type": "final"' in logger.to_json()
+    assert '"text": "done"' in logger.to_json()

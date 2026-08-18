@@ -91,6 +91,18 @@ Restrict tools to a specific allowlist:
 python main.py "read README.md" --allow-tool read_file
 ```
 
+List registered tools and their argument schemas:
+
+```bash
+python main.py --list-tools
+```
+
+Print the execution trace after the final response:
+
+```bash
+python main.py "search agent" --show-trace
+```
+
 ## Demo
 
 List workspace files:
@@ -134,6 +146,24 @@ $ python main.py "write notes.txt hello"
 error: write_file requires --allow-write or --dry-run before writing files
 ```
 
+Inspect available tools:
+
+```text
+$ python main.py --list-tools
+list_files: List files in the workspace.
+  - path (string, optional, default="."): Directory or file path relative to the workspace.
+read_file: Read a UTF-8 text file.
+  - path (string, required): File path relative to the workspace.
+run_python: Run restricted Python code.
+  - code (string, required): Restricted Python code to execute.
+search_text: Search text files for a query.
+  - query (string, required): Case-insensitive text query.
+  - path (string, optional, default="."): Directory or file path relative to the workspace.
+write_file: Write a UTF-8 text file.
+  - path (string, required): File path relative to the workspace.
+  - content (string, required): Content to write to the file.
+```
+
 ## Architecture
 
 ```text
@@ -156,6 +186,10 @@ Key modules:
 - `minicodeagent/tools.py`: built-in tool implementations.
 - `minicodeagent/permissions.py`: allowlist, write, and unsafe code checks.
 - `minicodeagent/trace.py`: JSON trace events.
+
+Each registered tool carries a lightweight schema describing expected arguments,
+required fields, defaults, and human-readable descriptions. This keeps the
+rule-based planner simple while leaving a clear path to an LLM planner later.
 
 ## Testing
 

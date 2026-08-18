@@ -9,6 +9,9 @@ from .permissions import PermissionController
 from .registry import Tool, ToolRegistry
 
 
+IGNORED_DIRS = {".git", ".pytest_cache", "__pycache__", "logs", ".venv", "venv"}
+
+
 def _safe_path(workspace: Path, target: str) -> Path:
     workspace = workspace.resolve()
     path = (workspace / target).resolve()
@@ -17,16 +20,28 @@ def _safe_path(workspace: Path, target: str) -> Path:
     return path
 
 
+def _is_ignored(path: Path, workspace: Path) -> bool:
+    relative_parts = path.relative_to(workspace.resolve()).parts
+    return any(part in IGNORED_DIRS for part in relative_parts)
+
+
+def _workspace_files(root: Path, workspace: Path) -> list[Path]:
+    if root.is_file():
+        return [] if _is_ignored(root, workspace) else [root]
+    return [
+        item
+        for item in root.rglob("*")
+        if item.is_file() and not _is_ignored(item, workspace)
+    ]
+
+
 def list_files(workspace: Path, path: str = ".") -> list[str]:
     root = _safe_path(workspace, path)
     if not root.exists():
         raise FileNotFoundError(path)
-    if root.is_file():
-        return [str(root.relative_to(workspace.resolve()))]
     return sorted(
         str(item.relative_to(workspace.resolve()))
-        for item in root.rglob("*")
-        if item.is_file()
+        for item in _workspace_files(root, workspace)
     )
 
 
@@ -51,7 +66,7 @@ def write_file(
 
 def search_text(workspace: Path, query: str, path: str = ".") -> list[dict[str, Any]]:
     root = _safe_path(workspace, path)
-    files = [root] if root.is_file() else [item for item in root.rglob("*") if item.is_file()]
+    files = _workspace_files(root, workspace)
     matches: list[dict[str, Any]] = []
     for file_path in files:
         try:
@@ -81,11 +96,87 @@ def run_python(code: str, permissions: PermissionController) -> dict[str, str]:
 
 def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(Tool("list_files", "List files in the workspace.", list_files))
-    registry.register(Tool("read_file", "Read a UTF-8 text file.", read_file))
     registry.register(
-        Tool("write_file", "Write a UTF-8 text file.", write_file, mutates_files=True)
+        Tool(
+            "list_files",
+            "List files in the workspace.",
+            list_files,
+            {
+                "path": {
+                    "type": "string",
+                    "required": False,
+                    "default": ".",
+                    "description": "Directory or file path relative to the workspace.",
+                }
+            },
+        )
     )
-    registry.register(Tool("search_text", "Search text files for a query.", search_text))
-    registry.register(Tool("run_python", "Run restricted Python code.", run_python))
+    registry.register(
+        Tool(
+            "read_file",
+            "Read a UTF-8 text file.",
+            read_file,
+            {
+                "path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "File path relative to the workspace.",
+                }
+            },
+        )
+    )
+    registry.register(
+        Tool(
+            "write_file",
+            "Write a UTF-8 text file.",
+            write_file,
+            {
+                "path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "File path relative to the workspace.",
+                },
+                "content": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Content to write to the file.",
+                },
+            },
+            mutates_files=True,
+        )
+    )
+    registry.register(
+        Tool(
+            "search_text",
+            "Search text files for a query.",
+            search_text,
+            {
+                "query": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Case-insensitive text query.",
+                },
+                "path": {
+                    "type": "string",
+                    "required": False,
+                    "default": ".",
+                    "description": "Directory or file path relative to the workspace.",
+                },
+            },
+        )
+    )
+    registry.register(
+        Tool(
+            "run_python",
+            "Run restricted Python code.",
+            run_python,
+            {
+                "code": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Restricted Python code to execute.",
+                }
+            },
+        )
+    )
     return registry

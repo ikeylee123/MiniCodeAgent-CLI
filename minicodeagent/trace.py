@@ -24,9 +24,12 @@ class TraceLogger:
     def record(self, event_type: str, **data: Any) -> None:
         self.events.append(TraceEvent(type=event_type, data=data))
 
+    def to_json(self) -> str:
+        payload = [asdict(event) for event in self.events]
+        return json.dumps(payload, indent=2)
+
     def flush(self) -> None:
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [asdict(event) for event in self.events]
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.path.write_text(self.to_json(), encoding="utf-8")

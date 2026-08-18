@@ -44,3 +44,12 @@ def test_agent_write_dry_run(tmp_path):
 
     assert agent.run("write note.txt hello") == "Dry run: note.txt"
     assert not (tmp_path / "note.txt").exists()
+
+
+def test_agent_search_skips_git_directory(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("secret agent", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("public agent", encoding="utf-8")
+    agent = make_agent(tmp_path)
+
+    assert agent.run("search agent") == "visible.txt:1: public agent"
