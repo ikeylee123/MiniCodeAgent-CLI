@@ -82,6 +82,8 @@ Inside the session, enter prompt commands one at a time:
 - `write notes.txt hello world`
 - `python print(sum(range(5)))`
 - `help`
+- `history`
+- `last`
 
 Exit commands:
 
@@ -123,6 +125,8 @@ interactive prompt:
 
 - `write` requires either `--allow-write` or `--dry-run`.
 - In interactive mode, `help` prints the supported commands and examples.
+- In interactive mode, `history` shows all executed prompts in the current session.
+- In interactive mode, `last` shows only the most recent executed prompt.
 - `--show-trace` works in both one-shot and interactive mode.
 - Prompt commands are simple rule-based patterns, not free-form natural language understanding.
 
@@ -276,8 +280,26 @@ Available commands:
   write <path> <content>
   python <code>
   help
+  history
+  last
   exit
   quit
+MiniCodeAgent> last
+Last session entry:
+prompt: read README.md
+tool: read_file
+response: # MiniCodeAgent CLI
+...
+MiniCodeAgent> history
+Session history:
+1. prompt: list files
+   tool: list_files
+   response: README.md
+...
+2. prompt: read README.md
+   tool: read_file
+   response: # MiniCodeAgent CLI
+...
 MiniCodeAgent> exit
 Session ended.
 ```

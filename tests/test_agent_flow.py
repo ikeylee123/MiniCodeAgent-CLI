@@ -115,3 +115,32 @@ def test_interactive_session_shows_help_and_usage_error(tmp_path, capsys):
     assert "Available commands:" in captured
     assert "search <query> [path]" in captured
     assert "error: Usage: write <path> <content>" in captured
+
+
+def test_interactive_session_history_and_last(tmp_path, capsys):
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+    prompts = iter(["read hello.txt", "search world", "last", "history", "quit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "Last session entry:" in captured
+    assert "prompt: search world" in captured
+    assert "tool: search_text" in captured
+    assert "Session history:" in captured
+    assert "1. prompt: read hello.txt" in captured
+    assert "2. prompt: search world" in captured
+
+
+def test_interactive_session_history_and_last_when_empty(tmp_path, capsys):
+    prompts = iter(["last", "history", "quit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "No previous session entry yet." in captured
+    assert "No session history yet." in captured

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from builtins import input as builtin_input
+from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import MiniCodeAgent, PromptParseError
@@ -18,6 +19,13 @@ DEFAULT_ALLOWED_TOOLS = {
     "search_text",
     "run_python",
 }
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    prompt: str
+    tool: str
+    response: str
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,6 +101,7 @@ def run_interactive(
     show_trace: bool = False,
     input_fn=builtin_input,
 ) -> int:
+    session_history: list[SessionRecord] = []
     print("MiniCodeAgent interactive mode. Type 'exit' or 'quit' to leave.")
     while True:
         try:
@@ -105,11 +114,27 @@ def run_interactive(
         if prompt.lower() == "help":
             print(format_command_reference())
             continue
+        if prompt.lower() == "history":
+            print(format_session_history(session_history))
+            continue
+        if prompt.lower() == "last":
+            print(format_last_session_record(session_history))
+            continue
         if prompt.lower() in {"exit", "quit"}:
             print("Session ended.")
             return 0
         try:
-            response = agent.run(prompt)
+            plan = agent.plan(prompt)
+            result = agent.execute(plan)
+            response = agent.respond(plan, result)
+            agent.trace.record("prompt", text=prompt)
+            agent.trace.record("plan", tool=plan.name, args=plan.args)
+            agent.trace.record("observation", tool=plan.name, result=result)
+            agent.trace.record("final", text=response)
+            agent.trace.flush()
+            session_history.append(
+                SessionRecord(prompt=prompt, tool=plan.name, response=response)
+            )
             print(response)
             if show_trace:
                 print("\nTrace:")
@@ -151,11 +176,37 @@ def format_command_reference() -> str:
         "  write <path> <content>",
         "  python <code>",
         "  help",
+        "  history",
+        "  last",
         "  exit",
         "  quit",
         "",
         "Flags are passed when starting the program, for example:",
         '  python main.py "write notes.txt hello" --dry-run',
         '  python main.py "search agent" --show-trace',
+    ]
+    return "\n".join(lines)
+
+
+def format_session_history(session_history: list[SessionRecord]) -> str:
+    if not session_history:
+        return "No session history yet."
+    lines = ["Session history:"]
+    for index, record in enumerate(session_history, start=1):
+        lines.append(f"{index}. prompt: {record.prompt}")
+        lines.append(f"   tool: {record.tool}")
+        lines.append(f"   response: {record.response}")
+    return "\n".join(lines)
+
+
+def format_last_session_record(session_history: list[SessionRecord]) -> str:
+    if not session_history:
+        return "No previous session entry yet."
+    record = session_history[-1]
+    lines = [
+        "Last session entry:",
+        f"prompt: {record.prompt}",
+        f"tool: {record.tool}",
+        f"response: {record.response}",
     ]
     return "\n".join(lines)
