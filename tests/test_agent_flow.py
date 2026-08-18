@@ -144,3 +144,17 @@ def test_interactive_session_history_and_last_when_empty(tmp_path, capsys):
     assert result == 0
     assert "No previous session entry yet." in captured
     assert "No session history yet." in captured
+
+
+def test_interactive_session_clear_resets_history(tmp_path, capsys):
+    (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
+    prompts = iter(["read hello.txt", "clear", "last", "history", "quit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "Session history cleared." in captured
+    assert "No previous session entry yet." in captured
+    assert "No session history yet." in captured

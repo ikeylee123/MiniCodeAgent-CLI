@@ -120,6 +120,10 @@ def run_interactive(
         if prompt.lower() == "last":
             print(format_last_session_record(session_history))
             continue
+        if prompt.lower() == "clear":
+            session_history.clear()
+            print("Session history cleared.")
+            continue
         if prompt.lower() in {"exit", "quit"}:
             print("Session ended.")
             return 0
@@ -178,6 +182,7 @@ def format_command_reference() -> str:
         "  help",
         "  history",
         "  last",
+        "  clear",
         "  exit",
         "  quit",
         "",

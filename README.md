@@ -84,6 +84,7 @@ Inside the session, enter prompt commands one at a time:
 - `help`
 - `history`
 - `last`
+- `clear`
 
 Exit commands:
 
@@ -127,6 +128,7 @@ interactive prompt:
 - In interactive mode, `help` prints the supported commands and examples.
 - In interactive mode, `history` shows all executed prompts in the current session.
 - In interactive mode, `last` shows only the most recent executed prompt.
+- In interactive mode, `clear` resets the current session history.
 - `--show-trace` works in both one-shot and interactive mode.
 - Prompt commands are simple rule-based patterns, not free-form natural language understanding.
 
@@ -282,6 +284,7 @@ Available commands:
   help
   history
   last
+  clear
   exit
   quit
 MiniCodeAgent> last
@@ -300,6 +303,10 @@ Session history:
    tool: read_file
    response: # MiniCodeAgent CLI
 ...
+MiniCodeAgent> clear
+Session history cleared.
+MiniCodeAgent> history
+No session history yet.
 MiniCodeAgent> exit
 Session ended.
 ```
