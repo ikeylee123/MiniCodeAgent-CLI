@@ -81,6 +81,7 @@ Inside the session, enter prompt commands one at a time:
 - `search permission`
 - `write notes.txt hello world`
 - `python print(sum(range(5)))`
+- `help`
 
 Exit commands:
 
@@ -102,7 +103,7 @@ The planner currently recognizes these patterns:
 | `python <code>` | `run_python(code="<code>")` |
 
 If a prompt does not match a known pattern, the current fallback behavior is to
-list files in the workspace.
+return a friendly error message.
 
 ### CLI flags
 
@@ -121,6 +122,7 @@ interactive prompt:
 ### Important behavior notes
 
 - `write` requires either `--allow-write` or `--dry-run`.
+- In interactive mode, `help` prints the supported commands and examples.
 - `--show-trace` works in both one-shot and interactive mode.
 - Prompt commands are simple rule-based patterns, not free-form natural language understanding.
 
@@ -264,6 +266,18 @@ minicodeagent/__init__.py
 MiniCodeAgent> read README.md
 # MiniCodeAgent CLI
 ...
+MiniCodeAgent> help
+Available commands:
+  list files
+  list <path>
+  ls
+  read <path>
+  search <query> [path]
+  write <path> <content>
+  python <code>
+  help
+  exit
+  quit
 MiniCodeAgent> exit
 Session ended.
 ```

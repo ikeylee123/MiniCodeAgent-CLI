@@ -56,6 +56,28 @@ def test_agent_search_skips_git_directory(tmp_path):
     assert agent.run("search agent") == "visible.txt:1: public agent"
 
 
+def test_agent_reports_missing_read_path(tmp_path):
+    agent = make_agent(tmp_path)
+
+    try:
+        agent.run("read")
+    except ValueError as exc:
+        assert str(exc) == "Usage: read <path>"
+    else:
+        raise AssertionError("Expected a usage error for missing read path")
+
+
+def test_agent_reports_unknown_command(tmp_path):
+    agent = make_agent(tmp_path)
+
+    try:
+        agent.run("summarize repo")
+    except ValueError as exc:
+        assert "Unknown command." in str(exc)
+    else:
+        raise AssertionError("Expected an error for unknown commands")
+
+
 def test_interactive_session_runs_multiple_commands(tmp_path, capsys):
     (tmp_path / "hello.txt").write_text("hello world", encoding="utf-8")
     prompts = iter(["read hello.txt", "search world", "exit"])
@@ -80,3 +102,16 @@ def test_interactive_session_handles_permission_errors(tmp_path, capsys):
     captured = capsys.readouterr().out
     assert result == 0
     assert "error: write_file requires --allow-write or --dry-run before writing files" in captured
+
+
+def test_interactive_session_shows_help_and_usage_error(tmp_path, capsys):
+    prompts = iter(["help", "write note.txt", "quit"])
+    agent = make_agent(tmp_path)
+
+    result = run_interactive(agent, input_fn=lambda _: next(prompts))
+
+    captured = capsys.readouterr().out
+    assert result == 0
+    assert "Available commands:" in captured
+    assert "search <query> [path]" in captured
+    assert "error: Usage: write <path> <content>" in captured

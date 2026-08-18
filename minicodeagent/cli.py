@@ -5,7 +5,7 @@ import json
 from builtins import input as builtin_input
 from pathlib import Path
 
-from .agent import MiniCodeAgent
+from .agent import MiniCodeAgent, PromptParseError
 from .permissions import PermissionConfig, PermissionController, PermissionDenied
 from .tools import build_registry
 from .trace import TraceLogger
@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.show_trace:
             print("\nTrace:")
             print(agent.trace.to_json())
-    except (PermissionDenied, FileNotFoundError, ValueError, KeyError) as exc:
+    except (PermissionDenied, FileNotFoundError, PromptParseError, ValueError, KeyError) as exc:
         print(f"error: {exc}")
         return 1
     return 0
@@ -102,6 +102,9 @@ def run_interactive(
             return 0
         if not prompt:
             continue
+        if prompt.lower() == "help":
+            print(format_command_reference())
+            continue
         if prompt.lower() in {"exit", "quit"}:
             print("Session ended.")
             return 0
@@ -111,7 +114,7 @@ def run_interactive(
             if show_trace:
                 print("\nTrace:")
                 print(agent.trace.to_json())
-        except (PermissionDenied, FileNotFoundError, ValueError, KeyError) as exc:
+        except (PermissionDenied, FileNotFoundError, PromptParseError, ValueError, KeyError) as exc:
             print(f"error: {exc}")
 
 
@@ -134,4 +137,25 @@ def format_tools(
                 f"  - {arg_name} ({arg_schema['type']}, {required}{default}): "
                 f"{arg_schema['description']}"
             )
+    return "\n".join(lines)
+
+
+def format_command_reference() -> str:
+    lines = [
+        "Available commands:",
+        "  list files",
+        "  list <path>",
+        "  ls",
+        "  read <path>",
+        "  search <query> [path]",
+        "  write <path> <content>",
+        "  python <code>",
+        "  help",
+        "  exit",
+        "  quit",
+        "",
+        "Flags are passed when starting the program, for example:",
+        '  python main.py "write notes.txt hello" --dry-run',
+        '  python main.py "search agent" --show-trace',
+    ]
     return "\n".join(lines)

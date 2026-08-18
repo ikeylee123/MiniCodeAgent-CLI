@@ -10,6 +10,10 @@ from .registry import ToolRegistry
 from .trace import TraceLogger
 
 
+class PromptParseError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ToolCall:
     name: str
@@ -41,26 +45,45 @@ class MiniCodeAgent:
         return response
 
     def plan(self, prompt: str) -> ToolCall:
-        tokens = shlex.split(prompt)
+        try:
+            tokens = shlex.split(prompt)
+        except ValueError as exc:
+            raise PromptParseError(f"Could not parse prompt: {exc}") from exc
         lowered = prompt.lower().strip()
 
         if lowered in {"list", "list files", "ls"} or lowered.startswith("list "):
             path = tokens[-1] if len(tokens) > 2 else "."
             return ToolCall("list_files", {"path": path})
 
-        if lowered.startswith("read ") and len(tokens) >= 2:
+        if lowered == "read":
+            raise PromptParseError("Usage: read <path>")
+        if lowered.startswith("read "):
+            if len(tokens) < 2:
+                raise PromptParseError("Usage: read <path>")
             return ToolCall("read_file", {"path": tokens[1]})
 
-        if lowered.startswith("search ") and len(tokens) >= 2:
+        if lowered == "search":
+            raise PromptParseError("Usage: search <query> [path]")
+        if lowered.startswith("search "):
+            if len(tokens) < 2:
+                raise PromptParseError("Usage: search <query> [path]")
             return ToolCall("search_text", {"query": tokens[1], "path": tokens[2] if len(tokens) > 2 else "."})
 
-        if lowered.startswith("write ") and len(tokens) >= 3:
+        if lowered == "write":
+            raise PromptParseError("Usage: write <path> <content>")
+        if lowered.startswith("write "):
+            if len(tokens) < 3:
+                raise PromptParseError("Usage: write <path> <content>")
             return ToolCall("write_file", {"path": tokens[1], "content": " ".join(tokens[2:])})
 
+        if lowered == "python":
+            raise PromptParseError("Usage: python <code>")
         if lowered.startswith("python ") and len(prompt.split(" ", 1)) == 2:
             return ToolCall("run_python", {"code": prompt.split(" ", 1)[1]})
 
-        return ToolCall("list_files", {"path": "."})
+        raise PromptParseError(
+            "Unknown command. Type 'help' in interactive mode or use --list-tools for available commands."
+        )
 
     def execute(self, call: ToolCall) -> Any:
         tool = self.registry.get(call.name)
