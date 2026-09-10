@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from builtins import input as builtin_input
 from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import MiniCodeAgent, PromptParseError
+from .llm_planner import LLMPlanner, LLMPlannerError
 from .permissions import PermissionConfig, PermissionController, PermissionDenied
 from .tools import build_registry
 from .trace import TraceLogger
@@ -28,9 +30,21 @@ class SessionRecord:
     response: str
 
 
+def positive_steps(value: str) -> int:
+    steps = int(value)
+    if steps < 1:
+        raise argparse.ArgumentTypeError("max-steps must be positive")
+    return steps
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MiniCodeAgent CLI")
     parser.add_argument("prompt", nargs="?", help="Task prompt, for example: 'list files'")
+    parser.add_argument("--max-steps", type=positive_steps, default=6, help="Maximum tool attempts per run (default: 6)")
+    parser.add_argument("--planner", choices=["rule", "llm"], default="rule")
+    parser.add_argument("--model", help="LLM model; defaults to MINICODEAGENT_MODEL")
+    parser.add_argument("--base-url", help="API base URL; defaults to OPENAI_BASE_URL or OpenAI /v1")
+    parser.add_argument("--llm-timeout", type=float, default=30.0, help="API timeout in seconds")
     parser.add_argument("--workspace", default=".", help="Workspace directory")
     parser.add_argument("--trace", default="trace.json", help="JSON trace output path")
     parser.add_argument(
@@ -74,11 +88,25 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     )
+    planner = None
+    if args.planner == "llm":
+        try:
+            planner = LLMPlanner(
+                model=args.model or os.environ.get("MINICODEAGENT_MODEL", ""),
+                api_key=os.environ.get("OPENAI_API_KEY", ""),
+                base_url=args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                timeout=args.llm_timeout,
+            )
+        except LLMPlannerError as exc:
+            print(f"error: {exc}")
+            return 1
     agent = MiniCodeAgent(
         workspace=Path(args.workspace),
         registry=registry,
         permissions=permissions,
         trace=TraceLogger(args.trace),
+        max_steps=args.max_steps,
+        planner=planner,
     )
     if args.interactive:
         return run_interactive(agent, show_trace=args.show_trace)
@@ -92,8 +120,10 @@ def main(argv: list[str] | None = None) -> int:
             print(agent.trace.to_json())
     except (PermissionDenied, FileNotFoundError, PromptParseError, ValueError, KeyError) as exc:
         print(f"error: {exc}")
+        if args.show_trace:
+            print(agent.trace.to_json())
         return 1
-    return 0
+    return 0 if agent.state.status == "completed" else 1
 
 
 def run_interactive(
@@ -128,23 +158,21 @@ def run_interactive(
             print("Session ended.")
             return 0
         try:
-            plan = agent.plan(prompt)
-            result = agent.execute(plan)
-            response = agent.respond(plan, result)
-            agent.trace.record("prompt", text=prompt)
-            agent.trace.record("plan", tool=plan.name, args=plan.args)
-            agent.trace.record("observation", tool=plan.name, result=result)
-            agent.trace.record("final", text=response)
-            agent.trace.flush()
-            session_history.append(
-                SessionRecord(prompt=prompt, tool=plan.name, response=response)
-            )
+            response = agent.run(prompt)
+            if agent.state.status == "completed":
+                session_history.append(SessionRecord(
+                    prompt=prompt,
+                    tool=" -> ".join(step.selected_tool for step in agent.state.steps),
+                    response=response,
+                ))
             print(response)
             if show_trace:
                 print("\nTrace:")
                 print(agent.trace.to_json())
         except (PermissionDenied, FileNotFoundError, PromptParseError, ValueError, KeyError) as exc:
             print(f"error: {exc}")
+            if show_trace:
+                print(agent.trace.to_json())
 
 
 def format_tools(

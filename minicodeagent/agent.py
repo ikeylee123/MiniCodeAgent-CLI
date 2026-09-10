@@ -1,92 +1,100 @@
 from __future__ import annotations
 
-import shlex
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .permissions import PermissionController
+from .planner import Planner, PromptParseError, RuleBasedPlanner
 from .registry import ToolRegistry
+from .state import AgentDecision, AgentError, AgentState, AgentStep, ToolCall
 from .trace import TraceLogger
 
 
-class PromptParseError(ValueError):
-    pass
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    name: str
-    args: dict[str, Any]
-
-
 class MiniCodeAgent:
-    def __init__(
-        self,
-        workspace: Path,
-        registry: ToolRegistry,
-        permissions: PermissionController,
-        trace: TraceLogger,
-    ) -> None:
+    def __init__(self, workspace: Path, registry: ToolRegistry,
+                 permissions: PermissionController, trace: TraceLogger,
+                 planner: Planner | None = None, max_steps: int = 6) -> None:
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+            raise ValueError("max_steps must be a positive integer")
         self.workspace = workspace
         self.registry = registry
         self.permissions = permissions
         self.trace = trace
+        self.planner = planner if planner is not None else RuleBasedPlanner()
+        self.max_steps = max_steps
+        self.state: AgentState | None = None
+
+    def plan(self, state: AgentState) -> AgentDecision:
+        return self.planner.plan(state)
 
     def run(self, prompt: str) -> str:
-        self.trace.record("prompt", text=prompt)
-        plan = self.plan(prompt)
-        self.trace.record("plan", tool=plan.name, args=plan.args)
-        result = self.execute(plan)
-        self.trace.record("observation", tool=plan.name, result=result)
-        response = self.respond(plan, result)
-        self.trace.record("final", text=response)
-        self.trace.flush()
-        return response
+        state = AgentState(prompt, self.max_steps, deepcopy(self.registry.schemas()))
+        self.state = state
+        run_id = uuid4().hex
 
-    def plan(self, prompt: str) -> ToolCall:
+        def record(event_type: str, **data: Any) -> None:
+            self.trace.record(event_type, run_id=run_id, **deepcopy(data))
+
+        record("prompt", text=prompt, max_steps=state.max_steps)
         try:
-            tokens = shlex.split(prompt)
-        except ValueError as exc:
-            raise PromptParseError(f"Could not parse prompt: {exc}") from exc
-        lowered = prompt.lower().strip()
-
-        if lowered in {"list", "list files", "ls"} or lowered.startswith("list "):
-            path = tokens[-1] if len(tokens) > 2 else "."
-            return ToolCall("list_files", {"path": path})
-
-        if lowered == "read":
-            raise PromptParseError("Usage: read <path>")
-        if lowered.startswith("read "):
-            if len(tokens) < 2:
-                raise PromptParseError("Usage: read <path>")
-            return ToolCall("read_file", {"path": tokens[1]})
-
-        if lowered == "search":
-            raise PromptParseError("Usage: search <query> [path]")
-        if lowered.startswith("search "):
-            if len(tokens) < 2:
-                raise PromptParseError("Usage: search <query> [path]")
-            return ToolCall("search_text", {"query": tokens[1], "path": tokens[2] if len(tokens) > 2 else "."})
-
-        if lowered == "write":
-            raise PromptParseError("Usage: write <path> <content>")
-        if lowered.startswith("write "):
-            if len(tokens) < 3:
-                raise PromptParseError("Usage: write <path> <content>")
-            return ToolCall("write_file", {"path": tokens[1], "content": " ".join(tokens[2:])})
-
-        if lowered == "python":
-            raise PromptParseError("Usage: python <code>")
-        if lowered.startswith("python ") and len(prompt.split(" ", 1)) == 2:
-            return ToolCall("run_python", {"code": prompt.split(" ", 1)[1]})
-
-        raise PromptParseError(
-            "Unknown command. Type 'help' in interactive mode or use --list-tools for available commands."
-        )
+            while True:
+                decision = self.plan(deepcopy(state))
+                if not isinstance(decision, AgentDecision):
+                    raise ValueError("Planner must return AgentDecision")
+                record("plan", step_number=state.current_step_count + 1,
+                       decision=decision.decision_type, tool=decision.tool_name,
+                       args=decision.tool_arguments, final_answer=decision.final_answer)
+                if decision.decision_type == "FINAL":
+                    if not isinstance(decision.final_answer, str):
+                        raise ValueError("FINAL decision requires a string final_answer")
+                    state.final_answer = decision.final_answer
+                    if decision.final_status not in {"completed", "failed"}:
+                        raise ValueError("Invalid final status")
+                    state.status = decision.final_status
+                    break
+                if decision.decision_type != "TOOL":
+                    raise ValueError("Unknown planner decision type")
+                # Permit a final planning pass after the last allowed tool operation.
+                if state.current_step_count >= state.max_steps:
+                    state.status = "max_steps"
+                    state.final_answer = f"error: Maximum steps reached ({state.max_steps})."
+                    break
+                call = ToolCall(decision.tool_name, deepcopy(decision.tool_arguments))
+                # Each identical call is allowed once per run.
+                if any(step.selected_tool == call.name and step.tool_arguments == call.args
+                       for step in state.steps):
+                    state.status = "repeated_action"
+                    state.final_answer = f"error: Repeated action blocked: {call.name}."
+                    break
+                step = AgentStep(state.current_step_count + 1, call.name, deepcopy(call.args))
+                try:
+                    step.observation = self.execute(call)
+                except Exception as exc:
+                    step.error = AgentError(type(exc).__name__, str(exc))
+                    step.observation = {"error": asdict(step.error)}
+                state.steps.append(step)
+                record("observation", step_number=step.step_number, tool=call.name,
+                       args=call.args, result=step.observation,
+                       error=asdict(step.error) if step.error else None)
+        except Exception as exc:
+            state.status = "failed"
+            state.final_answer = f"error: {exc}"
+            record("error", error={"type": type(exc).__name__, "message": str(exc)})
+            raise
+        finally:
+            record("final", text=state.final_answer, status=state.status,
+                   step_count=state.current_step_count)
+            self.trace.flush()
+        return state.final_answer
 
     def execute(self, call: ToolCall) -> Any:
+        if not isinstance(call.name, str) or not call.name:
+            raise ValueError("Tool name must be a non-empty string")
         tool = self.registry.get(call.name)
+        self.registry.validate(call.name, call.args)
         self.permissions.check_tool(tool.name, tool.mutates_files)
         if call.name in {"list_files", "read_file", "search_text"}:
             return tool.handler(self.workspace, **call.args)
@@ -101,21 +109,4 @@ class MiniCodeAgent:
         raise KeyError(f"Unsupported tool call: {call.name}")
 
     def respond(self, call: ToolCall, result: Any) -> str:
-        if call.name == "list_files":
-            if not result:
-                return "No files found."
-            return "\n".join(result)
-        if call.name == "read_file":
-            return str(result)
-        if call.name == "search_text":
-            if not result:
-                return "No matches found."
-            return "\n".join(
-                f"{item['path']}:{item['line']}: {item['text']}" for item in result
-            )
-        if call.name == "write_file":
-            mode = "Dry run" if result["dry_run"] else "Wrote"
-            return f"{mode}: {result['path']}"
-        if call.name == "run_python":
-            return result["stdout"].rstrip() or "Python completed with no output."
-        return str(result)
+        return RuleBasedPlanner().respond(call, result)

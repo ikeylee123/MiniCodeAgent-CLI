@@ -40,3 +40,16 @@ class ToolRegistry:
 
     def schemas(self) -> dict[str, dict[str, Any]]:
         return {name: tool.schema for name, tool in sorted(self._tools.items())}
+
+    def validate(self, name: str, args: dict[str, Any]) -> None:
+        schema = self.get(name).schema
+        if not isinstance(args, dict):
+            raise ValueError("Tool arguments must be a dictionary")
+        unknown = args.keys() - schema.keys()
+        if unknown:
+            raise ValueError(f"Unexpected arguments for {name}: {sorted(unknown)}")
+        for key, spec in schema.items():
+            if spec.get("required") and key not in args:
+                raise ValueError(f"Missing required argument: {key}")
+            if key in args and spec.get("type") == "string" and not isinstance(args[key], str):
+                raise ValueError(f"Argument {key} must be a string")
