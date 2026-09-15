@@ -6,6 +6,7 @@ from evals.run_eval import (
     CaseResult,
     EvalCase,
     calculate_metrics,
+    contains_all,
     classify_case,
     evaluate_trace,
     is_retryable_provider_failure,
@@ -351,3 +352,25 @@ def test_provider_retry_metrics_count_attempts_and_cases():
     assert metrics["cases_requiring_provider_retry"] == 2
     assert metrics["cases_still_provider_fail"] == 1
     assert metrics["task_success"] == [2, 3]
+
+def test_posix_expected_path_matches_windows_actual_path():
+    assert contains_all("source docs\\release.txt", ["docs/release.txt"])
+
+
+def test_windows_expected_path_matches_posix_actual_path():
+    assert contains_all("source docs/release.txt", ["docs\\release.txt"])
+
+
+def test_different_path_does_not_match_after_normalization():
+    assert not contains_all("source docs/release_notes.txt", ["docs/release.txt"])
+
+
+def test_non_path_fact_preserves_existing_matching_behavior():
+    assert contains_all("Project codename: Atlas", ["Atlas"])
+    assert not contains_all("Project codename: Atla", ["Atlas"])
+
+
+def test_a2_style_answer_satisfies_codename_and_posix_expected_path():
+    answer = "The project codename is Atlas, and it came from the document docs\\release.txt."
+
+    assert contains_all(answer, ["Atlas", "docs/release.txt"])

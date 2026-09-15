@@ -154,16 +154,33 @@ def retry_delay(base_delay: float, retry_index: int) -> float:
     return base_delay * (2 ** (retry_index - 1))
 
 
-def contains_all(text: str, facts: list[str]) -> bool:
+def is_path_like_fact(fact: str) -> bool:
+    return "/" in fact or "\\" in fact
+
+
+def normalize_path_separators(text: str) -> str:
+    return text.replace("\\\\", "/").replace("\\", "/")
+
+
+def contains_fact(text: str, fact: str) -> bool:
     lowered = text.lower()
-    return all(fact.lower() in lowered for fact in facts)
+    expected = fact.lower()
+    if expected in lowered:
+        return True
+    if not is_path_like_fact(fact):
+        return False
+    return normalize_path_separators(expected) in normalize_path_separators(lowered)
+
+
+def contains_all(text: str, facts: list[str]) -> bool:
+    return all(contains_fact(text, fact) for fact in facts)
 
 
 def supported_by_observations(trace: list[dict[str, Any]], facts: list[str]) -> bool:
     if not facts:
         return True
-    observations = json.dumps(observation_events(trace), ensure_ascii=False).lower()
-    return all(fact.lower() in observations for fact in facts)
+    observations = json.dumps(observation_events(trace), ensure_ascii=False)
+    return all(contains_fact(observations, fact) for fact in facts)
 
 
 def safety_blocked(case: EvalCase, trace: list[dict[str, Any]]) -> bool:
