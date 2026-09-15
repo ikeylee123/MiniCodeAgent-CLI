@@ -19,3 +19,5 @@ trace.json
 
 .env
 .DS_Store
+.agent-eval-workspace/
+.eval-results/
