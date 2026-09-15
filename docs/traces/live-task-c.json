@@ -1,0 +1,122 @@
+[
+  {
+    "type": "prompt",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "text": "Find the project codename in the workspace and calculate the sum of the integers from 1 through 100. Return both results.",
+      "max_steps": 6
+    },
+    "timestamp": "2026-09-14T06:14:13.146515+00:00"
+  },
+  {
+    "type": "plan",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 1,
+      "decision": "TOOL",
+      "tool": "list_files",
+      "args": {
+        "path": "."
+      },
+      "final_answer": null
+    },
+    "timestamp": "2026-09-14T06:14:15.102555+00:00"
+  },
+  {
+    "type": "observation",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 1,
+      "tool": "list_files",
+      "args": {
+        "path": "."
+      },
+      "result": [
+        "config\\service.txt",
+        "docs\\release.txt",
+        "docs\\security_notes.txt"
+      ],
+      "error": null
+    },
+    "timestamp": "2026-09-14T06:14:15.105205+00:00"
+  },
+  {
+    "type": "plan",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 2,
+      "decision": "TOOL",
+      "tool": "read_file",
+      "args": {
+        "path": "docs\\release.txt"
+      },
+      "final_answer": null
+    },
+    "timestamp": "2026-09-14T06:14:17.081643+00:00"
+  },
+  {
+    "type": "observation",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 2,
+      "tool": "read_file",
+      "args": {
+        "path": "docs\\release.txt"
+      },
+      "result": "\ufeffRelease date: 2026-10-01.\nProject codename: Atlas.\n\n",
+      "error": null
+    },
+    "timestamp": "2026-09-14T06:14:17.082933+00:00"
+  },
+  {
+    "type": "plan",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 3,
+      "decision": "TOOL",
+      "tool": "run_python",
+      "args": {
+        "code": "print(sum(range(1, 101)))"
+      },
+      "final_answer": null
+    },
+    "timestamp": "2026-09-14T06:14:19.061808+00:00"
+  },
+  {
+    "type": "observation",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "step_number": 3,
+      "tool": "run_python",
+      "args": {
+        "code": "print(sum(range(1, 101)))"
+      },
+      "result": {
+        "stdout": "5050\n"
+      },
+      "error": null
+    },
+    "timestamp": "2026-09-14T06:14:19.062048+00:00"
+  },
+  {
+    "type": "error",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "error": {
+        "type": "LLMPlannerError",
+        "message": "LLM API HTTP 429; check credentials, model and strict JSON Schema support."
+      }
+    },
+    "timestamp": "2026-09-14T06:14:19.550498+00:00"
+  },
+  {
+    "type": "final",
+    "data": {
+      "run_id": "7602e8df6b824b30a89c587c35f92c8d",
+      "text": "error: LLM API HTTP 429; check credentials, model and strict JSON Schema support.",
+      "status": "failed",
+      "step_count": 3
+    },
+    "timestamp": "2026-09-14T06:14:19.550534+00:00"
+  }
+]

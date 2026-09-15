@@ -212,6 +212,19 @@ See [three real-tool scenarios](docs/DEMONSTRATIONS.md) for successful search/re
 missing-path recovery, and blocked Python execution. See the
 [final architecture and claims audit](docs/FINAL_AUDIT.md) for evidence and limits.
 
+## Live LLM validation
+
+Gemini `gemini-2.5-flash` was tested through an OpenAI-compatible Chat
+Completions endpoint on a synthetic workspace. See the
+[live validation report](docs/LIVE_LLM_VALIDATION.md) for prompts, trace links,
+and claim limits.
+
+| Task | Result | Trace |
+| --- | --- | --- |
+| Normal multi-step retrieval | PASS | [`live-task-a.json`](docs/traces/live-task-a.json) |
+| Missing-path recovery | PASS | [`live-task-b.json`](docs/traces/live-task-b.json) |
+| Tool selection plus calculation | FAIL: final planner call hit HTTP 429 after successful tool observations | [`live-task-c.json`](docs/traces/live-task-c.json) |
+
 ## Demo
 
 List workspace files:
@@ -479,7 +492,8 @@ pytest
 ## Limitations
 
 - Rule mode is deterministic; optional LLM behavior depends on the selected provider.
-- Live-provider compatibility and task quality have not been tested in this change.
+- Live Gemini validation passed the retrieval and recovery scenarios, but one
+  calculation scenario failed on a provider HTTP 429 before the final answer.
 - `run_python` uses a restricted execution environment and simple pattern
   blocking. It is suitable for a demo, not for running untrusted code securely.
 - Tools are synchronous and local-only; the optional planner makes HTTP requests.
