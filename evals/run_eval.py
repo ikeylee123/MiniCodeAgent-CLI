@@ -5,10 +5,11 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,9 @@ PROVIDER_FAILURE_MARKERS = {
     "invalid AgentDecision": "PROVIDER_INVALID_DECISION",
     "malformed": "PROVIDER_MALFORMED_RESPONSE",
 }
+RETRYABLE_PROVIDER_FAILURES = {"PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE"}
+SleepFn = Callable[[float], None]
+RunFn = Callable[["EvalCase", Path, Path, str, str | None, float, int], "CaseResult"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,19 @@ class EvalCase:
 
 
 @dataclass(frozen=True)
+class AttemptResult:
+    attempt: int
+    status: str
+    provider_failure_category: str | None
+    trace_path: str
+    final_status: str | None
+    final_answer: str
+    tool_sequence: list[str]
+    tool_call_count: int
+    notes: str = ""
+
+
+@dataclass(frozen=True)
 class CaseResult:
     id: str
     category: str
@@ -51,6 +68,11 @@ class CaseResult:
     trace_path: str
     provider_failure_category: str | None = None
     notes: str = ""
+    attempts: list[AttemptResult] = field(default_factory=list)
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self.attempts) if self.attempts else 1
 
 
 def load_cases(path: Path = DEFAULT_CASES_PATH) -> list[EvalCase]:
@@ -106,10 +128,6 @@ def final_event(trace: list[dict[str, Any]]) -> dict[str, Any] | None:
     return finals[-1] if finals else None
 
 
-def error_events(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [event["data"] for event in trace if event.get("type") == "error"]
-
-
 def tool_sequence(trace: list[dict[str, Any]]) -> list[str]:
     return [event["tool"] for event in observation_events(trace)]
 
@@ -124,6 +142,16 @@ def provider_failure_category(text: str) -> str | None:
         if marker.lower() in lowered:
             return category
     return None
+
+
+def is_retryable_provider_failure(result: CaseResult) -> bool:
+    return result.status == "PROVIDER_FAIL" and result.provider_failure_category in RETRYABLE_PROVIDER_FAILURES
+
+
+def retry_delay(base_delay: float, retry_index: int) -> float:
+    if retry_index < 1:
+        raise ValueError("retry_index must start at 1")
+    return base_delay * (2 ** (retry_index - 1))
 
 
 def contains_all(text: str, facts: list[str]) -> bool:
@@ -180,8 +208,6 @@ def classify_case(case: EvalCase, trace: list[dict[str, Any]], stdout: str = "",
     if case.safety_behavior:
         if safety_blocked(case, trace):
             return "SAFETY_PASS", None, "blocked by permission layer"
-        if provider_category:
-            return "PROVIDER_FAIL", provider_category, provider_category
         return "AGENT_FAIL", None, "expected safety block was not observed"
 
     if case.requires_recovery and not recovery_succeeded(case, trace, final_answer):
@@ -196,6 +222,37 @@ def classify_case(case: EvalCase, trace: list[dict[str, Any]], stdout: str = "",
     if not trace or final is None:
         return "INCOMPLETE", None, "trace or final event missing"
     return "AGENT_FAIL", None, "final answer did not satisfy expected facts"
+
+
+def attempt_from_result(result: CaseResult, attempt: int) -> AttemptResult:
+    return AttemptResult(
+        attempt=attempt,
+        status=result.status,
+        provider_failure_category=result.provider_failure_category,
+        trace_path=result.trace_path,
+        final_status=result.final_status,
+        final_answer=result.final_answer,
+        tool_sequence=result.tool_sequence,
+        tool_call_count=result.tool_call_count,
+        notes=result.notes,
+    )
+
+
+def with_attempt_history(result: CaseResult, attempts: list[AttemptResult]) -> CaseResult:
+    retry_note = f"; provider retry attempts before final result: {len(attempts) - 1}" if len(attempts) > 1 else ""
+    return CaseResult(
+        id=result.id,
+        category=result.category,
+        status=result.status,
+        final_status=result.final_status,
+        final_answer=result.final_answer,
+        tool_sequence=result.tool_sequence,
+        tool_call_count=result.tool_call_count,
+        trace_path=result.trace_path,
+        provider_failure_category=result.provider_failure_category,
+        notes=result.notes + retry_note,
+        attempts=attempts,
+    )
 
 
 def evaluate_trace(case: EvalCase, trace_path: Path, stdout: str = "", stderr: str = "") -> CaseResult:
@@ -216,16 +273,17 @@ def evaluate_trace(case: EvalCase, trace_path: Path, stdout: str = "", stderr: s
     )
 
 
-def run_case(
+def run_case_attempt(
     case: EvalCase,
     workspace: Path,
     results_dir: Path,
     planner: str,
     model: str | None,
     timeout: float,
+    attempt: int = 1,
 ) -> CaseResult:
     results_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = results_dir / f"{case.id}.trace.json"
+    trace_path = results_dir / f"{case.id}.attempt-{attempt}.trace.json"
     cmd = [
         sys.executable,
         str(REPO_ROOT / "main.py"),
@@ -248,10 +306,42 @@ def run_case(
         capture_output=True,
         check=False,
     )
-    result = evaluate_trace(case, trace_path, completed.stdout, completed.stderr)
+    return evaluate_trace(case, trace_path, completed.stdout, completed.stderr)
+
+
+def run_case(
+    case: EvalCase,
+    workspace: Path,
+    results_dir: Path,
+    planner: str,
+    model: str | None,
+    timeout: float,
+    provider_retries: int = 0,
+    retry_delay_seconds: float = 30.0,
+    sleep_fn: SleepFn = time.sleep,
+    run_attempt_fn: RunFn = run_case_attempt,
+) -> CaseResult:
+    if provider_retries < 0:
+        raise ValueError("provider_retries must be non-negative")
+    if retry_delay_seconds < 0:
+        raise ValueError("retry_delay_seconds must be non-negative")
+
+    attempts: list[AttemptResult] = []
+    final_result: CaseResult | None = None
+    for attempt in range(1, provider_retries + 2):
+        result = run_attempt_fn(case, workspace, results_dir, planner, model, timeout, attempt)
+        attempts.append(attempt_from_result(result, attempt))
+        final_result = result
+        if not is_retryable_provider_failure(result) or attempt > provider_retries:
+            break
+        sleep_fn(retry_delay(retry_delay_seconds, attempt))
+
+    assert final_result is not None
+    final_result = with_attempt_history(final_result, attempts)
+    results_dir.mkdir(parents=True, exist_ok=True)
     result_path = results_dir / f"{case.id}.result.json"
-    result_path.write_text(json.dumps(asdict(result), indent=2), encoding="utf-8")
-    return result
+    result_path.write_text(json.dumps(asdict(final_result), indent=2), encoding="utf-8")
+    return final_result
 
 
 def tool_selection_success(case: EvalCase, result: CaseResult) -> bool:
@@ -276,8 +366,12 @@ def calculate_metrics(cases: list[EvalCase], results: list[CaseResult]) -> dict[
     recovery_success = sum(1 for case in recovery if by_id[case.id].status == "PASS")
     safety = [case for case in evaluated if case.safety_behavior]
     safety_success = sum(1 for case in safety if by_id[case.id].status == "SAFETY_PASS")
-    provider_failures = sum(1 for result in results if result.status == "PROVIDER_FAIL")
     average_tool_calls = sum(result.tool_call_count for result in results) / len(results) if results else 0.0
+    provider_failure_attempts = sum(
+        1 for result in results for attempt in (result.attempts or []) if attempt.status == "PROVIDER_FAIL"
+    )
+    cases_requiring_provider_retry = sum(1 for result in results if len(result.attempts) > 1)
+    cases_still_provider_fail = sum(1 for result in results if result.status == "PROVIDER_FAIL")
     return {
         "task_success": [task_success, len(evaluated)],
         "tool_selection_success": [tool_success, len(tool_required)],
@@ -285,14 +379,30 @@ def calculate_metrics(cases: list[EvalCase], results: list[CaseResult]) -> dict[
         "recovery_success": [recovery_success, len(recovery)],
         "safety_enforcement": [safety_success, len(safety)],
         "average_tool_calls": round(average_tool_calls, 2),
-        "provider_api_failures": provider_failures,
+        "provider_api_failures": cases_still_provider_fail,
+        "provider_failure_attempts": provider_failure_attempts,
+        "cases_requiring_provider_retry": cases_requiring_provider_retry,
+        "cases_still_provider_fail": cases_still_provider_fail,
     }
 
 
-def write_summary(cases: list[EvalCase], results: list[CaseResult], results_dir: Path) -> Path:
+def write_summary(
+    cases: list[EvalCase],
+    results: list[CaseResult],
+    results_dir: Path,
+    delay_seconds: float = 0.0,
+    provider_retries: int = 0,
+    retry_delay_seconds: float = 30.0,
+) -> Path:
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "commit": current_commit(),
+        "run_policy": {
+            "delay_seconds": delay_seconds,
+            "provider_retries": provider_retries,
+            "retry_delay_seconds": retry_delay_seconds,
+            "retryable_provider_failures": sorted(RETRYABLE_PROVIDER_FAILURES),
+        },
         "metrics": calculate_metrics(cases, results),
         "results": [asdict(result) for result in results],
     }
@@ -317,7 +427,15 @@ def format_metric(value: Any) -> str:
     return str(value)
 
 
-def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], provider: str, model: str | None) -> str:
+def render_markdown_report(
+    cases: list[EvalCase],
+    results: list[CaseResult],
+    provider: str,
+    model: str | None,
+    delay_seconds: float = 0.0,
+    provider_retries: int = 0,
+    retry_delay_seconds: float = 30.0,
+) -> str:
     metrics = calculate_metrics(cases, results)
     lines = [
         "# Agent Evaluation",
@@ -329,6 +447,9 @@ def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], pro
         f"- provider: {provider}",
         f"- model: {model or os.environ.get('MINICODEAGENT_MODEL', '<environment>')}",
         f"- number of cases: {len(results)}",
+        f"- delay between cases: {delay_seconds} seconds",
+        f"- provider retries: {provider_retries}",
+        f"- initial retry delay: {retry_delay_seconds} seconds",
         "",
         "No API keys or credentials are recorded in this report.",
         "",
@@ -343,6 +464,9 @@ def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], pro
         f"| Safety Enforcement Rate | {format_metric(metrics['safety_enforcement'])} |",
         f"| Average Tool Calls | {metrics['average_tool_calls']} |",
         f"| Provider/API Failures | {metrics['provider_api_failures']} |",
+        f"| Provider Failure Attempts | {metrics['provider_failure_attempts']} |",
+        f"| Cases Requiring Provider Retry | {metrics['cases_requiring_provider_retry']} |",
+        f"| Cases Still Ending in PROVIDER_FAIL | {metrics['cases_still_provider_fail']} |",
         "",
         "## Case Results",
         "",
@@ -353,7 +477,8 @@ def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], pro
     for result in results:
         sequence = " -> ".join(result.tool_sequence) or "(none)"
         case = case_by_id[result.id]
-        lines.append(f"| {result.id} | {case.category} | {result.status} | `{sequence}` | {result.notes} |")
+        retry_note = f" attempts={result.attempt_count}"
+        lines.append(f"| {result.id} | {case.category} | {result.status} | `{sequence}` | {result.notes}{retry_note} |")
     provider_failures = [r for r in results if r.status == "PROVIDER_FAIL"]
     agent_failures = [r for r in results if r.status == "AGENT_FAIL"]
     safety_passes = [r for r in results if r.status == "SAFETY_PASS"]
@@ -364,10 +489,13 @@ def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], pro
         "",
         f"- agent logic failures: {len(agent_failures)}",
         f"- provider/API failures: {len(provider_failures)}",
+        f"- provider failure attempts: {metrics['provider_failure_attempts']}",
+        f"- cases requiring provider retry: {metrics['cases_requiring_provider_retry']}",
         f"- safety blocks: {len(safety_passes)}",
         f"- ambiguous/incomplete cases: {len(incomplete)}",
         "",
         "Provider/API failures are counted separately from agent planning failures.",
+        "Retry history is preserved per case and successful reruns are disclosed.",
         "",
         "## Limitations",
         "",
@@ -381,9 +509,19 @@ def render_markdown_report(cases: list[EvalCase], results: list[CaseResult], pro
     return "\n".join(lines) + "\n"
 
 
-def write_markdown_report(cases: list[EvalCase], results: list[CaseResult], path: Path, provider: str, model: str | None) -> Path:
+def write_markdown_report(
+    cases: list[EvalCase],
+    results: list[CaseResult],
+    path: Path,
+    provider: str,
+    model: str | None,
+    delay_seconds: float = 0.0,
+    provider_retries: int = 0,
+    retry_delay_seconds: float = 30.0,
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_markdown_report(cases, results, provider, model), encoding="utf-8")
+    path.write_text(render_markdown_report(
+        cases, results, provider, model, delay_seconds, provider_retries, retry_delay_seconds), encoding="utf-8")
     return path
 
 
@@ -397,30 +535,70 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--delay-seconds", type=float, default=0.0, help="Seconds to wait between completed evaluation cases")
+    parser.add_argument("--provider-retries", type=int, default=0, help="Retries for retryable provider failures such as HTTP 429 or 503")
+    parser.add_argument("--retry-delay-seconds", type=float, default=30.0, help="Initial retry delay; doubled for each retry")
     parser.add_argument("--write-doc", action="store_true", help="Write docs/AGENT_EVALUATION.md from the completed result set")
     parser.add_argument("--provider", default="OpenAI-compatible provider")
     return parser
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if args.delay_seconds < 0:
+        raise ValueError("delay-seconds must be non-negative")
+    if args.provider_retries < 0:
+        raise ValueError("provider-retries must be non-negative")
+    if args.retry_delay_seconds < 0:
+        raise ValueError("retry-delay-seconds must be non-negative")
+
+
+def run_selected_cases(
+    selected: list[EvalCase],
+    workspace: Path,
+    results_dir: Path,
+    planner: str,
+    model: str | None,
+    timeout: float,
+    delay_seconds: float,
+    provider_retries: int,
+    retry_delay_seconds: float,
+    sleep_fn: SleepFn = time.sleep,
+    run_case_fn: Callable[..., CaseResult] = run_case,
+) -> list[CaseResult]:
+    results: list[CaseResult] = []
+    for index, case in enumerate(selected):
+        if index > 0 and delay_seconds > 0:
+            sleep_fn(delay_seconds)
+        result = run_case_fn(
+            case, workspace, results_dir, planner, model, timeout,
+            provider_retries, retry_delay_seconds, sleep_fn)
+        results.append(result)
+        suffix = f" ({result.provider_failure_category})" if result.provider_failure_category else ""
+        retry_suffix = f" attempts={result.attempt_count}" if result.attempt_count > 1 else ""
+        print(f"Case {result.id}: {result.status}{suffix}{retry_suffix}")
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    validate_args(args)
     cases = load_cases()
     selected = select_cases(cases, args.case, args.all)
     create_workspace(args.workspace)
     args.results.mkdir(parents=True, exist_ok=True)
 
-    results: list[CaseResult] = []
-    for case in selected:
-        result = run_case(case, args.workspace, args.results, args.planner, args.model, args.timeout)
-        results.append(result)
-        suffix = f" ({result.provider_failure_category})" if result.provider_failure_category else ""
-        print(f"Case {result.id}: {result.status}{suffix}")
-
-    summary_path = write_summary(selected, results, args.results)
+    results = run_selected_cases(
+        selected, args.workspace, args.results, args.planner, args.model, args.timeout,
+        args.delay_seconds, args.provider_retries, args.retry_delay_seconds)
+    summary_path = write_summary(
+        selected, results, args.results, args.delay_seconds,
+        args.provider_retries, args.retry_delay_seconds)
     print(f"Summary: {summary_path}")
     if args.write_doc:
         report_path = write_markdown_report(
-            selected, results, REPO_ROOT / "docs" / "AGENT_EVALUATION.md", args.provider, args.model)
+            selected, results, REPO_ROOT / "docs" / "AGENT_EVALUATION.md",
+            args.provider, args.model, args.delay_seconds,
+            args.provider_retries, args.retry_delay_seconds)
         print(f"Report: {report_path}")
     return 0 if all(result.status in {"PASS", "SAFETY_PASS"} for result in results) else 1
 
