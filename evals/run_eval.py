@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,7 @@ class CaseResult:
     provider_failure_category: str | None = None
     notes: str = ""
     attempts: list[AttemptResult] = field(default_factory=list)
+    run_id: str = ""
 
     @property
     def attempt_count(self) -> int:
@@ -255,7 +257,7 @@ def attempt_from_result(result: CaseResult, attempt: int) -> AttemptResult:
     )
 
 
-def with_attempt_history(result: CaseResult, attempts: list[AttemptResult]) -> CaseResult:
+def with_attempt_history(result: CaseResult, attempts: list[AttemptResult], run_id: str = "") -> CaseResult:
     retry_note = f"; provider retry attempts before final result: {len(attempts) - 1}" if len(attempts) > 1 else ""
     return CaseResult(
         id=result.id,
@@ -269,6 +271,7 @@ def with_attempt_history(result: CaseResult, attempts: list[AttemptResult]) -> C
         provider_failure_category=result.provider_failure_category,
         notes=result.notes + retry_note,
         attempts=attempts,
+        run_id=run_id or result.run_id,
     )
 
 
@@ -354,7 +357,7 @@ def run_case(
         sleep_fn(retry_delay(retry_delay_seconds, attempt))
 
     assert final_result is not None
-    final_result = with_attempt_history(final_result, attempts)
+    final_result = with_attempt_history(final_result, attempts, results_dir.name)
     results_dir.mkdir(parents=True, exist_ok=True)
     result_path = results_dir / f"{case.id}.result.json"
     result_path.write_text(json.dumps(asdict(final_result), indent=2), encoding="utf-8")
@@ -410,10 +413,19 @@ def write_summary(
     delay_seconds: float = 0.0,
     provider_retries: int = 0,
     retry_delay_seconds: float = 30.0,
+    run_id: str = "",
+    generated_at: str | None = None,
+    model: str | None = None,
+    provider: str = "OpenAI-compatible provider",
 ) -> Path:
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id or results_dir.name,
+        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
         "commit": current_commit(),
+        "model": model or os.environ.get("MINICODEAGENT_MODEL", "<environment>"),
+        "provider": provider,
+        "artifact_directory": str(results_dir),
+        "selected_case_ids": [case.id for case in cases],
         "run_policy": {
             "delay_seconds": delay_seconds,
             "provider_retries": provider_retries,
@@ -452,6 +464,8 @@ def render_markdown_report(
     delay_seconds: float = 0.0,
     provider_retries: int = 0,
     retry_delay_seconds: float = 30.0,
+    run_id: str = "",
+    artifact_directory: str = "",
 ) -> str:
     metrics = calculate_metrics(cases, results)
     lines = [
@@ -463,6 +477,8 @@ def render_markdown_report(
         f"- commit hash: `{current_commit()}`",
         f"- provider: {provider}",
         f"- model: {model or os.environ.get('MINICODEAGENT_MODEL', '<environment>')}",
+        f"- run ID: {run_id or '<unknown>'}",
+        f"- artifact directory: {artifact_directory or '<unknown>'}",
         f"- number of cases: {len(results)}",
         f"- delay between cases: {delay_seconds} seconds",
         f"- provider retries: {provider_retries}",
@@ -535,11 +551,36 @@ def write_markdown_report(
     delay_seconds: float = 0.0,
     provider_retries: int = 0,
     retry_delay_seconds: float = 30.0,
+    run_id: str = "",
+    artifact_directory: str = "",
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_markdown_report(
-        cases, results, provider, model, delay_seconds, provider_retries, retry_delay_seconds), encoding="utf-8")
+        cases, results, provider, model, delay_seconds, provider_retries,
+        retry_delay_seconds, run_id, artifact_directory), encoding="utf-8")
     return path
+
+
+def create_run_directory(
+    results_root: Path,
+    now_fn: Callable[[], datetime] | None = None,
+    unique_id_fn: Callable[[], str] | None = None,
+    max_attempts: int = 10,
+) -> tuple[str, Path, str]:
+    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+    unique_id_fn = unique_id_fn or (lambda: uuid.uuid4().hex)
+    generated_at = now_fn().astimezone(timezone.utc)
+    timestamp = generated_at.strftime("%Y%m%dT%H%M%SZ")
+    results_root.mkdir(parents=True, exist_ok=True)
+    for _ in range(max_attempts):
+        run_id = f"{timestamp}-{unique_id_fn()[:8]}"
+        run_dir = results_root / run_id
+        try:
+            run_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_id, run_dir, generated_at.isoformat()
+    raise FileExistsError("Could not create a unique evaluation run directory")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -602,20 +643,24 @@ def main(argv: list[str] | None = None) -> int:
     cases = load_cases()
     selected = select_cases(cases, args.case, args.all)
     create_workspace(args.workspace)
-    args.results.mkdir(parents=True, exist_ok=True)
+    run_id, run_dir, generated_at = create_run_directory(args.results)
+    print(f"Run ID: {run_id}")
+    print(f"Artifacts: {run_dir}")
 
     results = run_selected_cases(
-        selected, args.workspace, args.results, args.planner, args.model, args.timeout,
+        selected, args.workspace, run_dir, args.planner, args.model, args.timeout,
         args.delay_seconds, args.provider_retries, args.retry_delay_seconds)
     summary_path = write_summary(
-        selected, results, args.results, args.delay_seconds,
-        args.provider_retries, args.retry_delay_seconds)
+        selected, results, run_dir, args.delay_seconds,
+        args.provider_retries, args.retry_delay_seconds, run_id,
+        generated_at, args.model, args.provider)
     print(f"Summary: {summary_path}")
     if args.write_doc:
         report_path = write_markdown_report(
             selected, results, REPO_ROOT / "docs" / "AGENT_EVALUATION.md",
             args.provider, args.model, args.delay_seconds,
-            args.provider_retries, args.retry_delay_seconds)
+            args.provider_retries, args.retry_delay_seconds,
+            run_id, str(run_dir))
         print(f"Report: {report_path}")
     return 0 if all(result.status in {"PASS", "SAFETY_PASS"} for result in results) else 1
 

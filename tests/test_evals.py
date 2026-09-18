@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from evals.run_eval import (
@@ -8,6 +9,7 @@ from evals.run_eval import (
     calculate_metrics,
     contains_all,
     classify_case,
+    create_run_directory,
     evaluate_trace,
     is_retryable_provider_failure,
     load_cases,
@@ -15,6 +17,7 @@ from evals.run_eval import (
     retry_delay,
     run_case,
     run_selected_cases,
+    write_summary,
 )
 
 
@@ -205,7 +208,10 @@ def test_markdown_report_contains_required_sections():
     cases = [case(id="A1")]
     results = [result("A1", "PASS", 2)]
 
-    report = render_markdown_report(cases, results, "Gemini OpenAI-compatible", "gemini-2.5-flash")
+    report = render_markdown_report(
+        cases, results, "Gemini OpenAI-compatible", "gemini-2.5-flash",
+        run_id="20260918T094413Z-ab7d0780",
+        artifact_directory=".eval-results/20260918T094413Z-ab7d0780")
 
     assert "# Agent Evaluation" in report
     assert "## Overall Results" in report
@@ -214,6 +220,8 @@ def test_markdown_report_contains_required_sections():
     assert "Provider/API Failures" in report
     assert "Provider Failure Attempts" in report
     assert "No API keys or credentials" in report
+    assert "20260918T094413Z-ab7d0780" in report
+    assert ".eval-results/20260918T094413Z-ab7d0780" in report
 
 
 def test_default_delay_is_zero_in_help_parser():
@@ -374,3 +382,102 @@ def test_a2_style_answer_satisfies_codename_and_posix_expected_path():
     answer = "The project codename is Atlas, and it came from the document docs\\release.txt."
 
     assert contains_all(answer, ["Atlas", "docs/release.txt"])
+
+
+def test_run_directories_isolate_invocations_and_artifacts(tmp_path):
+    results_root = tmp_path / "results"
+    historical = results_root / "C1.attempt-2.trace.json"
+    results_root.mkdir()
+    historical.write_text("historical evidence", encoding="utf-8")
+    fixed_now = lambda: datetime(2026, 9, 18, 9, 44, 13, tzinfo=timezone.utc)
+    ids = iter(["ab7d0780aaaa", "cd9e1234bbbb"])
+
+    run_id_1, run_dir_1, generated_at_1 = create_run_directory(
+        results_root, fixed_now, lambda: next(ids))
+    first_trace = run_dir_1 / "T1.attempt-1.trace.json"
+    first_trace.write_text("first invocation", encoding="utf-8")
+
+    def first_attempt(_case, _workspace, results, *_args):
+        return CaseResult(
+            id="T1", category="normal", status="PASS", final_status="completed",
+            final_answer="42", tool_sequence=["read_file"], tool_call_count=1,
+            trace_path=str(results / "T1.attempt-1.trace.json"))
+
+    first_result = run_case(
+        case(), tmp_path / "workspace", run_dir_1, "rule", None, 30.0,
+        run_attempt_fn=first_attempt)
+    first_summary = write_summary(
+        [case()], [first_result], run_dir_1, run_id=run_id_1,
+        generated_at=generated_at_1, model="fake-model", provider="fake-provider")
+    first_snapshot = {path.name: path.read_bytes() for path in run_dir_1.iterdir()}
+
+    run_id_2, run_dir_2, generated_at_2 = create_run_directory(
+        results_root, fixed_now, lambda: next(ids))
+    second_trace = run_dir_2 / "T1.attempt-1.trace.json"
+    second_trace.write_text("second invocation", encoding="utf-8")
+
+    def second_attempt(_case, _workspace, results, *_args):
+        return CaseResult(
+            id="T1", category="normal", status="PASS", final_status="completed",
+            final_answer="42", tool_sequence=["read_file"], tool_call_count=1,
+            trace_path=str(results / "T1.attempt-1.trace.json"))
+
+    second_result = run_case(
+        case(), tmp_path / "workspace", run_dir_2, "rule", None, 30.0,
+        run_attempt_fn=second_attempt)
+    second_summary = write_summary(
+        [case()], [second_result], run_dir_2, run_id=run_id_2,
+        generated_at=generated_at_2, model="fake-model", provider="fake-provider")
+
+    assert run_id_1 == "20260918T094413Z-ab7d0780"
+    assert run_id_2 == "20260918T094413Z-cd9e1234"
+    assert run_dir_1 != run_dir_2
+    assert first_trace.parent == first_summary.parent == run_dir_1
+    assert second_trace.parent == second_summary.parent == run_dir_2
+    assert first_trace.name == second_trace.name == "T1.attempt-1.trace.json"
+    assert (run_dir_1 / "T1.result.json").exists()
+    assert (run_dir_2 / "T1.result.json").exists()
+    assert first_snapshot == {path.name: path.read_bytes() for path in run_dir_1.iterdir()}
+    assert historical.read_text(encoding="utf-8") == "historical evidence"
+
+    first_result_payload = json.loads((run_dir_1 / "T1.result.json").read_text(encoding="utf-8"))
+    second_result_payload = json.loads((run_dir_2 / "T1.result.json").read_text(encoding="utf-8"))
+    first_summary_payload = json.loads(first_summary.read_text(encoding="utf-8"))
+    second_summary_payload = json.loads(second_summary.read_text(encoding="utf-8"))
+    assert first_result_payload["run_id"] == run_id_1
+    assert second_result_payload["run_id"] == run_id_2
+    assert first_summary_payload["run_id"] == run_id_1
+    assert second_summary_payload["run_id"] == run_id_2
+    assert first_summary_payload["artifact_directory"] == str(run_dir_1)
+    assert second_summary_payload["artifact_directory"] == str(run_dir_2)
+    assert first_summary_payload["selected_case_ids"] == ["T1"]
+    assert first_summary_payload["model"] == "fake-model"
+    assert first_summary_payload["provider"] == "fake-provider"
+
+
+def test_run_directory_collision_generates_a_new_id(tmp_path):
+    fixed_now = lambda: datetime(2026, 9, 18, 9, 44, 13, tzinfo=timezone.utc)
+    ids = iter(["duplicate0000", "duplicate0000", "unique990000"])
+    first_id, first_dir, _ = create_run_directory(tmp_path, fixed_now, lambda: next(ids))
+    second_id, second_dir, _ = create_run_directory(tmp_path, fixed_now, lambda: next(ids))
+
+    assert first_id == "20260918T094413Z-duplicat"
+    assert second_id == "20260918T094413Z-unique99"
+    assert first_dir.exists()
+    assert second_dir.exists()
+
+
+def test_case_result_trace_path_stays_in_invocation_directory(tmp_path):
+    run_dir = tmp_path / "20260918T094413Z-ab7d0780"
+
+    item = run_case(
+        case(), tmp_path / "workspace", run_dir, "rule", None, 30.0,
+        run_attempt_fn=lambda _case, _workspace, results, *_args: CaseResult(
+            id="T1", category="normal", status="PASS", final_status="completed",
+            final_answer="42", tool_sequence=["read_file"], tool_call_count=1,
+            trace_path=str(results / "T1.attempt-1.trace.json")))
+
+    payload = json.loads((run_dir / "T1.result.json").read_text(encoding="utf-8"))
+    assert Path(item.trace_path).parent == run_dir
+    assert Path(payload["trace_path"]).parent == run_dir
+    assert payload["run_id"] == run_dir.name
