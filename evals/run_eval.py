@@ -26,6 +26,9 @@ PROVIDER_FAILURE_MARKERS = {
     "invalid AgentDecision": "PROVIDER_INVALID_DECISION",
     "malformed": "PROVIDER_MALFORMED_RESPONSE",
 }
+CONFIG_FAILURE_MARKERS = {
+    "LLM mode requires a valid OPENAI_API_KEY.": "required LLM credential unavailable before agent execution",
+}
 RETRYABLE_PROVIDER_FAILURES = {"PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE"}
 SleepFn = Callable[[float], None]
 RunFn = Callable[["EvalCase", Path, Path, str, str | None, float, int], "CaseResult"]
@@ -146,6 +149,14 @@ def provider_failure_category(text: str) -> str | None:
     return None
 
 
+def configuration_failure_reason(text: str) -> str | None:
+    lowered = text.lower()
+    for marker, reason in CONFIG_FAILURE_MARKERS.items():
+        if marker.lower() in lowered:
+            return reason
+    return None
+
+
 def is_retryable_provider_failure(result: CaseResult) -> bool:
     return result.status == "PROVIDER_FAIL" and result.provider_failure_category in RETRYABLE_PROVIDER_FAILURES
 
@@ -216,6 +227,10 @@ def recovery_succeeded(case: EvalCase, trace: list[dict[str, Any]], final_answer
 
 def classify_case(case: EvalCase, trace: list[dict[str, Any]], stdout: str = "", stderr: str = "") -> tuple[str, str | None, str]:
     combined = trace_text(trace, stdout, stderr)
+    config_reason = configuration_failure_reason(combined)
+    if config_reason and not observation_events(trace) and final_event(trace) is None:
+        return "CONFIG_FAIL", None, config_reason
+
     provider_category = provider_failure_category(combined)
     if provider_category:
         return "PROVIDER_FAIL", provider_category, provider_category
@@ -376,7 +391,10 @@ def tool_selection_success(case: EvalCase, result: CaseResult) -> bool:
 
 def calculate_metrics(cases: list[EvalCase], results: list[CaseResult]) -> dict[str, Any]:
     by_id = {result.id: result for result in results}
-    evaluated = [case for case in cases if case.id in by_id]
+    evaluated = [
+        case for case in cases
+        if case.id in by_id and by_id[case.id].status != "CONFIG_FAIL"
+    ]
     task_success = sum(1 for case in evaluated if by_id[case.id].status == "PASS")
     tool_required = [case for case in evaluated if case.category != "edge" or case.requires_multi_step]
     tool_success = sum(1 for case in tool_required if tool_selection_success(case, by_id[case.id]))
@@ -386,12 +404,17 @@ def calculate_metrics(cases: list[EvalCase], results: list[CaseResult]) -> dict[
     recovery_success = sum(1 for case in recovery if by_id[case.id].status == "PASS")
     safety = [case for case in evaluated if case.safety_behavior]
     safety_success = sum(1 for case in safety if by_id[case.id].status == "SAFETY_PASS")
-    average_tool_calls = sum(result.tool_call_count for result in results) / len(results) if results else 0.0
+    evaluated_results = [result for result in results if result.status != "CONFIG_FAIL"]
+    average_tool_calls = (
+        sum(result.tool_call_count for result in evaluated_results) / len(evaluated_results)
+        if evaluated_results else 0.0
+    )
     provider_failure_attempts = sum(
         1 for result in results for attempt in (result.attempts or []) if attempt.status == "PROVIDER_FAIL"
     )
     cases_requiring_provider_retry = sum(1 for result in results if len(result.attempts) > 1)
     cases_still_provider_fail = sum(1 for result in results if result.status == "PROVIDER_FAIL")
+    config_failures = sum(1 for result in results if result.status == "CONFIG_FAIL")
     return {
         "task_success": [task_success, len(evaluated)],
         "tool_selection_success": [tool_success, len(tool_required)],
@@ -403,6 +426,7 @@ def calculate_metrics(cases: list[EvalCase], results: list[CaseResult]) -> dict[
         "provider_failure_attempts": provider_failure_attempts,
         "cases_requiring_provider_retry": cases_requiring_provider_retry,
         "cases_still_provider_fail": cases_still_provider_fail,
+        "config_failures": config_failures,
     }
 
 
@@ -500,6 +524,7 @@ def render_markdown_report(
         f"| Provider Failure Attempts | {metrics['provider_failure_attempts']} |",
         f"| Cases Requiring Provider Retry | {metrics['cases_requiring_provider_retry']} |",
         f"| Cases Still Ending in PROVIDER_FAIL | {metrics['cases_still_provider_fail']} |",
+        f"| Configuration Failures | {metrics['config_failures']} |",
         "",
         "## Case Results",
         "",
@@ -516,6 +541,7 @@ def render_markdown_report(
     agent_failures = [r for r in results if r.status == "AGENT_FAIL"]
     safety_passes = [r for r in results if r.status == "SAFETY_PASS"]
     incomplete = [r for r in results if r.status == "INCOMPLETE"]
+    config_failures = [r for r in results if r.status == "CONFIG_FAIL"]
     lines.extend([
         "",
         "## Failure Analysis",
@@ -526,6 +552,7 @@ def render_markdown_report(
         f"- cases requiring provider retry: {metrics['cases_requiring_provider_retry']}",
         f"- safety blocks: {len(safety_passes)}",
         f"- ambiguous/incomplete cases: {len(incomplete)}",
+        f"- evaluation configuration failures: {len(config_failures)}",
         "",
         "Provider/API failures are counted separately from agent planning failures.",
         "Retry history is preserved per case and successful reruns are disclosed.",

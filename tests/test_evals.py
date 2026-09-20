@@ -129,6 +129,45 @@ def test_provider_failure_is_not_agent_failure():
     assert note == "PROVIDER_RATE_LIMIT"
 
 
+def test_missing_llm_api_key_is_configuration_failure_before_agent_execution():
+    status, provider, note = classify_case(
+        case(category="recovery", requires_recovery=True),
+        [],
+        stdout="error: LLM mode requires a valid OPENAI_API_KEY.",
+    )
+
+    assert status == "CONFIG_FAIL"
+    assert status != "AGENT_FAIL"
+    assert status != "PROVIDER_FAIL"
+    assert provider is None
+    assert note == "required LLM credential unavailable before agent execution"
+
+
+def test_missing_key_text_after_meaningful_agent_execution_remains_agent_failure():
+    trace = [
+        observation(1, "read_file", "unrelated"),
+        final("error: LLM mode requires a valid OPENAI_API_KEY.", status="failed"),
+    ]
+
+    status, provider, _note = classify_case(case(requires_multi_step=False), trace)
+
+    assert status == "AGENT_FAIL"
+    assert provider is None
+
+
+def test_http_503_remains_provider_unavailable():
+    trace = [
+        {"type": "error", "data": {"error": {"type": "LLMPlannerError", "message": "LLM API HTTP 503"}}},
+        final("error: LLM API HTTP 503", status="failed"),
+    ]
+
+    status, provider, note = classify_case(case(), trace)
+
+    assert status == "PROVIDER_FAIL"
+    assert provider == "PROVIDER_UNAVAILABLE"
+    assert note == "PROVIDER_UNAVAILABLE"
+
+
 def test_safety_pass_for_blocked_python():
     trace = [
         observation(
@@ -286,6 +325,22 @@ def test_agent_fail_is_not_retried(tmp_path):
     assert final_result.status == "AGENT_FAIL"
 
 
+def test_config_fail_is_not_retried(tmp_path):
+    calls = []
+
+    def fake_attempt(_case, _workspace, _results, _planner, _model, _timeout, attempt_number):
+        calls.append(attempt_number)
+        return result("T1", "CONFIG_FAIL")
+
+    final_result = run_case(
+        case(), tmp_path / "workspace", tmp_path / "results", "llm", None, 30.0,
+        provider_retries=2, sleep_fn=lambda _: None, run_attempt_fn=fake_attempt)
+
+    assert calls == [1]
+    assert final_result.status == "CONFIG_FAIL"
+    assert is_retryable_provider_failure(final_result) is False
+
+
 def test_pass_is_not_retried(tmp_path):
     calls = []
 
@@ -360,6 +415,29 @@ def test_provider_retry_metrics_count_attempts_and_cases():
     assert metrics["cases_requiring_provider_retry"] == 2
     assert metrics["cases_still_provider_fail"] == 1
     assert metrics["task_success"] == [2, 3]
+
+
+def test_config_fail_is_excluded_from_agent_metric_denominators():
+    cases = [
+        case(id="A", category="recovery", requires_recovery=True),
+        case(id="B", requires_multi_step=False),
+        case(id="C", requires_multi_step=False),
+    ]
+    results = [
+        result("A", "CONFIG_FAIL", 0, category="recovery"),
+        result("B", "PASS", 1),
+        result("C", "AGENT_FAIL", 1),
+    ]
+
+    metrics = calculate_metrics(cases, results)
+
+    assert metrics["task_success"] == [1, 2]
+    assert metrics["tool_selection_success"] == [2, 2]
+    assert metrics["recovery_success"] == [0, 0]
+    assert metrics["provider_api_failures"] == 0
+    assert metrics["config_failures"] == 1
+    assert metrics["average_tool_calls"] == 1.0
+
 
 def test_posix_expected_path_matches_windows_actual_path():
     assert contains_all("source docs\\release.txt", ["docs/release.txt"])
