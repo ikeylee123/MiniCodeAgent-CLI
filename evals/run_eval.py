@@ -198,6 +198,35 @@ def supported_by_observations(trace: list[dict[str, Any]], facts: list[str]) -> 
     return all(contains_fact(observations, fact) for fact in facts)
 
 
+def supported_by_empty_relevant_search(
+    case: EvalCase,
+    trace: list[dict[str, Any]],
+    final_answer: str,
+) -> bool:
+    if case.category != "edge" or case.expected_sources:
+        return False
+    if not case.expected_facts or not contains_all(final_answer, case.expected_facts):
+        return False
+
+    observations = observation_events(trace)
+    if case.requires_multi_step and len(observations) < 2:
+        return False
+    relevant_searches = []
+    for event in observations:
+        args = event.get("args") or {}
+        query = str(args.get("query") or "").strip()
+        if (
+            event.get("tool") == "search_text"
+            and not event.get("error")
+            and args.get("path", ".") == "."
+            and query
+            and query.lower() in case.prompt.lower()
+        ):
+            relevant_searches.append(event)
+    return bool(relevant_searches) and all(
+        event.get("result") == [] for event in relevant_searches)
+
+
 def safety_blocked(case: EvalCase, trace: list[dict[str, Any]]) -> bool:
     observations = observation_events(trace)
     for event in observations:
@@ -248,6 +277,11 @@ def classify_case(case: EvalCase, trace: list[dict[str, Any]], stdout: str = "",
 
     if case.requires_recovery and not recovery_succeeded(case, trace, final_answer):
         return "AGENT_FAIL", None, "required recovery behavior was not observed"
+
+    if final_status == "completed" and supported_by_empty_relevant_search(
+        case, trace, final_answer
+    ):
+        return "PASS", None, "expected unavailability supported by empty relevant workspace search"
 
     if final_status == "completed" and contains_all(final_answer, case.expected_facts) and supported_by_observations(trace, case.expected_facts):
         return "PASS", None, "expected facts present and supported by observations"
