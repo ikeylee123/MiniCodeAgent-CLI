@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -74,6 +75,7 @@ class CaseResult:
     notes: str = ""
     attempts: list[AttemptResult] = field(default_factory=list)
     run_id: str = ""
+    working_tree_dirty: bool | None = None
 
     @property
     def attempt_count(self) -> int:
@@ -272,7 +274,12 @@ def attempt_from_result(result: CaseResult, attempt: int) -> AttemptResult:
     )
 
 
-def with_attempt_history(result: CaseResult, attempts: list[AttemptResult], run_id: str = "") -> CaseResult:
+def with_attempt_history(
+    result: CaseResult,
+    attempts: list[AttemptResult],
+    run_id: str = "",
+    working_tree_dirty: bool | None = None,
+) -> CaseResult:
     retry_note = f"; provider retry attempts before final result: {len(attempts) - 1}" if len(attempts) > 1 else ""
     return CaseResult(
         id=result.id,
@@ -287,6 +294,7 @@ def with_attempt_history(result: CaseResult, attempts: list[AttemptResult], run_
         notes=result.notes + retry_note,
         attempts=attempts,
         run_id=run_id or result.run_id,
+        working_tree_dirty=working_tree_dirty,
     )
 
 
@@ -355,6 +363,7 @@ def run_case(
     retry_delay_seconds: float = 30.0,
     sleep_fn: SleepFn = time.sleep,
     run_attempt_fn: RunFn = run_case_attempt,
+    working_tree_dirty: bool | None = None,
 ) -> CaseResult:
     if provider_retries < 0:
         raise ValueError("provider_retries must be non-negative")
@@ -372,7 +381,8 @@ def run_case(
         sleep_fn(retry_delay(retry_delay_seconds, attempt))
 
     assert final_result is not None
-    final_result = with_attempt_history(final_result, attempts, results_dir.name)
+    final_result = with_attempt_history(
+        final_result, attempts, results_dir.name, working_tree_dirty)
     results_dir.mkdir(parents=True, exist_ok=True)
     result_path = results_dir / f"{case.id}.result.json"
     result_path.write_text(json.dumps(asdict(final_result), indent=2), encoding="utf-8")
@@ -441,6 +451,7 @@ def write_summary(
     generated_at: str | None = None,
     model: str | None = None,
     provider: str = "OpenAI-compatible provider",
+    working_tree_dirty: bool | None = None,
 ) -> Path:
     payload = {
         "run_id": run_id or results_dir.name,
@@ -450,6 +461,7 @@ def write_summary(
         "provider": provider,
         "artifact_directory": str(results_dir),
         "selected_case_ids": [case.id for case in cases],
+        "working_tree_dirty": working_tree_dirty,
         "run_policy": {
             "delay_seconds": delay_seconds,
             "provider_retries": provider_retries,
@@ -472,6 +484,24 @@ def current_commit() -> str:
         return completed.stdout.strip() if completed.returncode == 0 else "unknown"
     except OSError:
         return "unknown"
+
+
+def current_working_tree_dirty(
+    run_fn: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool | None:
+    try:
+        completed = run_fn(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
 
 
 def format_metric(value: Any) -> str:
@@ -671,16 +701,19 @@ def main(argv: list[str] | None = None) -> int:
     selected = select_cases(cases, args.case, args.all)
     create_workspace(args.workspace)
     run_id, run_dir, generated_at = create_run_directory(args.results)
+    working_tree_dirty = current_working_tree_dirty()
     print(f"Run ID: {run_id}")
     print(f"Artifacts: {run_dir}")
 
     results = run_selected_cases(
         selected, args.workspace, run_dir, args.planner, args.model, args.timeout,
-        args.delay_seconds, args.provider_retries, args.retry_delay_seconds)
+        args.delay_seconds, args.provider_retries, args.retry_delay_seconds,
+        run_case_fn=partial(run_case, working_tree_dirty=working_tree_dirty))
     summary_path = write_summary(
         selected, results, run_dir, args.delay_seconds,
         args.provider_retries, args.retry_delay_seconds, run_id,
-        generated_at, args.model, args.provider)
+        generated_at, args.model, args.provider,
+        working_tree_dirty=working_tree_dirty)
     print(f"Summary: {summary_path}")
     if args.write_doc:
         report_path = write_markdown_report(

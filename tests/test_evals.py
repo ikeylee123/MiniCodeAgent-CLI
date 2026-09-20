@@ -1,7 +1,9 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import evals.run_eval as run_eval
 from evals.run_eval import (
     AttemptResult,
     CaseResult,
@@ -10,6 +12,7 @@ from evals.run_eval import (
     contains_all,
     classify_case,
     create_run_directory,
+    current_working_tree_dirty,
     evaluate_trace,
     is_retryable_provider_failure,
     load_cases,
@@ -559,3 +562,116 @@ def test_case_result_trace_path_stays_in_invocation_directory(tmp_path):
     assert Path(item.trace_path).parent == run_dir
     assert Path(payload["trace_path"]).parent == run_dir
     assert payload["run_id"] == run_dir.name
+
+
+def test_working_tree_dirty_detects_clean_and_dirty_states():
+    calls = []
+
+    def fake_run(_cmd, **_kwargs):
+        calls.append(1)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    assert current_working_tree_dirty(fake_run) is False
+
+    def fake_dirty_run(_cmd, **_kwargs):
+        calls.append(1)
+        return SimpleNamespace(returncode=0, stdout=" M evals/run_eval.py\n")
+
+    assert current_working_tree_dirty(fake_dirty_run) is True
+    assert len(calls) == 2
+
+
+def test_working_tree_dirty_handles_unavailable_git_state():
+    assert current_working_tree_dirty(
+        lambda _cmd, **_kwargs: SimpleNamespace(returncode=1, stdout="")) is None
+
+    def unavailable_run(_cmd, **_kwargs):
+        raise OSError("git unavailable")
+
+    assert current_working_tree_dirty(unavailable_run) is None
+
+
+def test_provenance_is_recorded_in_result_and_summary(tmp_path, monkeypatch):
+    run_dir = tmp_path / "20260920T050000Z-12345678"
+    item = run_case(
+        case(), tmp_path / "workspace", run_dir, "rule", None, 30.0,
+        run_attempt_fn=lambda *_args: result("T1", "PASS"),
+        working_tree_dirty=False,
+    )
+    monkeypatch.setattr(run_eval, "current_commit", lambda: "abc123")
+    summary_path = write_summary(
+        [case()], [item], run_dir,
+        run_id=run_dir.name,
+        generated_at="2026-09-20T05:00:00+00:00",
+        model="fake-model",
+        provider="fake-provider",
+        working_tree_dirty=False,
+    )
+
+    result_payload = json.loads(
+        (run_dir / "T1.result.json").read_text(encoding="utf-8"))
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert result_payload["working_tree_dirty"] is False
+    assert summary_payload["working_tree_dirty"] is False
+    assert summary_payload["commit"] == "abc123"
+
+
+def test_unknown_repository_state_is_recorded_as_null(tmp_path, monkeypatch):
+    run_dir = tmp_path / "20260920T050000Z-unknown0"
+    run_dir.mkdir()
+    monkeypatch.setattr(run_eval, "current_commit", lambda: "unknown")
+
+    summary_path = write_summary(
+        [case()], [result("T1", "PASS")], run_dir,
+        working_tree_dirty=None,
+    )
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert payload["working_tree_dirty"] is None
+
+
+def test_repository_state_is_determined_once_per_invocation(tmp_path, monkeypatch):
+    calls = []
+    captured = {}
+    run_dir = tmp_path / "20260920T050000Z-once0001"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(run_eval, "load_cases", lambda: [case()])
+    monkeypatch.setattr(run_eval, "create_workspace", lambda _path: None)
+    monkeypatch.setattr(
+        run_eval,
+        "create_run_directory",
+        lambda _root: (
+            run_dir.name,
+            run_dir,
+            "2026-09-20T05:00:00+00:00",
+        ),
+    )
+
+    def fake_repository_state():
+        calls.append(1)
+        return True
+
+    def fake_run_selected(*_args, **kwargs):
+        captured["run_case_fn"] = kwargs["run_case_fn"]
+        return [result("T1", "PASS")]
+
+    def fake_write_summary(*_args, **kwargs):
+        captured["summary_dirty"] = kwargs["working_tree_dirty"]
+        return run_dir / "summary.json"
+
+    monkeypatch.setattr(run_eval, "current_working_tree_dirty", fake_repository_state)
+    monkeypatch.setattr(run_eval, "run_selected_cases", fake_run_selected)
+    monkeypatch.setattr(run_eval, "write_summary", fake_write_summary)
+
+    exit_code = run_eval.main([
+        "--case", "T1",
+        "--planner", "rule",
+        "--workspace", str(tmp_path / "workspace"),
+        "--results", str(tmp_path / "results"),
+    ])
+
+    assert exit_code == 0
+    assert calls == [1]
+    assert captured["summary_dirty"] is True
+    assert captured["run_case_fn"].keywords["working_tree_dirty"] is True
