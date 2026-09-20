@@ -225,6 +225,22 @@ and claim limits.
 | Missing-path recovery | PASS | [`live-task-b.json`](docs/traces/live-task-b.json) |
 | Tool selection plus calculation | FAIL: final planner call hit HTTP 429 after successful tool observations | [`live-task-c.json`](docs/traces/live-task-c.json) |
 
+## Evaluation
+
+The repository includes a reproducible 12-case evaluation for the observation-driven
+multi-step tool-calling agent. Gemini 2.5 Flash was exercised through the optional
+OpenAI-compatible planner against the synthetic workspace.
+
+- Non-safety task success: 9/10 (90%)
+- Recovery cases: 3/3
+- Safety enforcement cases: 2/2
+- Tool-selection cases: 2/3, with one documented planner-stagnation failure
+- Deterministic test suite: 142 tests
+
+See the [evidence-grounded evaluation report](docs/AGENT_EVALUATION.md) for
+per-case results, evaluator corrections, provider events, provenance, and
+limitations.
+
 ## Demo
 
 List workspace files:
